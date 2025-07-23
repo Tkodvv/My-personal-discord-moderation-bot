@@ -25,6 +25,7 @@ A comprehensive Discord moderation bot built with Python and discord.py v2.3+, f
 - `/clear` or `!clear` - Delete messages with optional user filtering
 - `/snipe` or `!snipe` - View recently deleted messages
 - `/setprefix` - Change the bot's command prefix
+- `/dm` or `!dm` - Send direct messages to any user
 
 ### 🎛️ Command Types
 - **Slash Commands** (`/command`) - Modern Discord interface with autocomplete

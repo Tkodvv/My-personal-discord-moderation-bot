@@ -43,8 +43,8 @@ Preferred communication style: Simple, everyday language.
 
 #### Admin Cog (`cogs/admin.py`)
 - **Purpose**: Administrative commands for server management
-- **Commands**: say, announce, clear, snipe, setprefix
-- **Features**: Message management, announcements, deleted message tracking
+- **Commands**: say, announce, clear, snipe, setprefix, dm
+- **Features**: Message management, announcements, deleted message tracking, direct messaging
 
 ### Command Interface
 
@@ -59,6 +59,7 @@ Preferred communication style: Simple, everyday language.
 - `!say <message>` - Auto-deleting say command
 - `!clear <amount> [@member]` - Auto-deleting clear command
 - `!snipe` - Auto-deleting snipe command
+- `!dm @user <message>` - Auto-deleting direct message command
 - `!userinfo [@member]` (alias: `!ui`) - Auto-deleting user info
 - `!avatar [@member]` (alias: `!av`) - Auto-deleting avatar display
 - `!ping` - Auto-deleting ping command
