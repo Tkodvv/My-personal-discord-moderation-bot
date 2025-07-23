@@ -229,6 +229,144 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message(f"❌ Failed to send DM: {e}", ephemeral=True)
             self.logger.error(f"Failed to send DM to {user}: {e}")
     
+    @app_commands.command(name="setnick", description="Change a member's nickname")
+    @app_commands.describe(
+        member="The member to change nickname for",
+        nickname="The new nickname (leave empty to remove nickname)"
+    )
+    async def setnick(self, interaction: discord.Interaction, member: discord.Member, nickname: Optional[str] = None):
+        """Change a member's nickname."""
+        # Check permissions
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+            
+        if not interaction.user.guild_permissions.manage_nicknames:
+            await interaction.response.send_message("❌ You don't have permission to manage nicknames.", ephemeral=True)
+            return
+        
+        # Check if bot can change the nickname
+        if member.top_role >= interaction.guild.me.top_role and member != interaction.guild.me:
+            await interaction.response.send_message("❌ I cannot change this member's nickname due to role hierarchy.", ephemeral=True)
+            return
+        
+        try:
+            old_nick = member.display_name
+            await member.edit(nick=nickname)
+            
+            embed = discord.Embed(
+                title="✅ Nickname Changed",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(name="Member", value=member.mention, inline=True)
+            embed.add_field(name="Old Nickname", value=old_nick, inline=True)
+            embed.add_field(name="New Nickname", value=nickname or member.name, inline=True)
+            embed.set_footer(text=f"Changed by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+            
+            await interaction.response.send_message(embed=embed)
+            self.logger.info(f"Nickname changed for {member} by {interaction.user}: {old_nick} -> {nickname or member.name}")
+            
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ I don't have permission to change this member's nickname.", ephemeral=True)
+        except discord.HTTPException as e:
+            await interaction.response.send_message(f"❌ Failed to change nickname: {e}", ephemeral=True)
+    
+    @app_commands.command(name="addrole", description="Add a role to a member")
+    @app_commands.describe(
+        member="The member to add the role to",
+        role="The role to add"
+    )
+    async def addrole(self, interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+        """Add a role to a member."""
+        # Check permissions
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+            
+        if not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ You don't have permission to manage roles.", ephemeral=True)
+            return
+        
+        # Check role hierarchy
+        if role >= interaction.user.top_role and interaction.user != interaction.guild.owner:
+            await interaction.response.send_message("❌ You cannot assign a role that is higher than or equal to your highest role.", ephemeral=True)
+            return
+        
+        if role >= interaction.guild.me.top_role:
+            await interaction.response.send_message("❌ I cannot assign this role due to role hierarchy.", ephemeral=True)
+            return
+        
+        # Check if member already has the role
+        if role in member.roles:
+            await interaction.response.send_message(f"❌ {member.display_name} already has the {role.name} role.", ephemeral=True)
+            return
+        
+        try:
+            await member.add_roles(role)
+            
+            embed = discord.Embed(
+                title="✅ Role Added",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(name="Member", value=member.mention, inline=True)
+            embed.add_field(name="Role Added", value=role.mention, inline=True)
+            embed.set_footer(text=f"Added by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+            
+            await interaction.response.send_message(embed=embed)
+            self.logger.info(f"Role {role.name} added to {member} by {interaction.user}")
+            
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ I don't have permission to add this role.", ephemeral=True)
+        except discord.HTTPException as e:
+            await interaction.response.send_message(f"❌ Failed to add role: {e}", ephemeral=True)
+    
+    @app_commands.command(name="watchuser", description="Add a user to the watch list for monitoring")
+    @app_commands.describe(
+        user="The user to add to watch list",
+        reason="Reason for watching this user"
+    )
+    async def watchuser(self, interaction: discord.Interaction, user: discord.User, *, reason: str = "No reason provided"):
+        """Add a user to the watch list."""
+        # Check permissions
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+            
+        if not interaction.user.guild_permissions.kick_members:
+            await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+            return
+        
+        # Initialize watch list if it doesn't exist
+        if not hasattr(self, 'watch_list'):
+            self.watch_list = {}
+        
+        # Add user to watch list
+        guild_id = interaction.guild.id
+        if guild_id not in self.watch_list:
+            self.watch_list[guild_id] = {}
+        
+        self.watch_list[guild_id][user.id] = {
+            'user': user,
+            'reason': reason,
+            'added_by': interaction.user,
+            'added_at': discord.utils.utcnow()
+        }
+        
+        embed = discord.Embed(
+            title="👁️ User Added to Watch List",
+            color=discord.Color.orange(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="User", value=f"{user.mention} ({user.name}#{user.discriminator})", inline=False)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_footer(text=f"Added by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+        embed.set_thumbnail(url=user.display_avatar.url)
+        
+        await interaction.response.send_message(embed=embed)
+        self.logger.info(f"User {user} added to watch list by {interaction.user} - Reason: {reason}")
+    
     # Prefix command versions (auto-delete)
     @commands.command(name="say")
     async def prefix_say(self, ctx, *, message):
