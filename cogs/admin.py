@@ -18,6 +18,13 @@ class AdminCog(commands.Cog):
         self.logger = logging.getLogger(__name__)
         # Store deleted messages for snipe command
         self.deleted_messages = {}
+    
+    async def delete_command_message(self, ctx):
+        """Helper to delete the command message."""
+        try:
+            await ctx.message.delete()
+        except (discord.NotFound, discord.Forbidden):
+            pass
         
     @commands.Cog.listener()
     async def on_message_delete(self, message):
@@ -189,6 +196,74 @@ class AdminCog(commands.Cog):
         self.logger.info(f"Prefix changed to '{prefix}' by {interaction.user} in {interaction.guild.name}")
         
         await interaction.response.send_message(embed=embed)
+    
+    # Prefix command versions (auto-delete)
+    @commands.command(name="say")
+    async def prefix_say(self, ctx, *, message):
+        """Prefix version of say command."""
+        await self.delete_command_message(ctx)
+        
+        if not isinstance(ctx.author, discord.Member):
+            return
+            
+        if not ctx.author.guild_permissions.manage_messages:
+            await ctx.send("❌ You don't have permission to use this command.", delete_after=5)
+            return
+        
+        await ctx.send(message)
+    
+    @commands.command(name="clear")
+    async def prefix_clear(self, ctx, amount: int, member: Optional[discord.Member] = None):
+        """Prefix version of clear command."""
+        await self.delete_command_message(ctx)
+        
+        if not isinstance(ctx.author, discord.Member):
+            return
+            
+        if not ctx.author.guild_permissions.manage_messages:
+            await ctx.send("❌ You don't have permission to use this command.", delete_after=5)
+            return
+        
+        if amount < 1 or amount > 100:
+            await ctx.send("❌ Amount must be between 1 and 100.", delete_after=5)
+            return
+        
+        try:
+            if member:
+                def check(msg):
+                    return msg.author == member
+                deleted = await ctx.channel.purge(limit=amount * 2, check=check)
+            else:
+                deleted = await ctx.channel.purge(limit=amount)
+            
+            confirmation = await ctx.send(f"✅ Deleted {len(deleted)} messages")
+            await confirmation.delete(delay=3)
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
+    
+    @commands.command(name="snipe")
+    async def prefix_snipe(self, ctx):
+        """Prefix version of snipe command."""
+        await self.delete_command_message(ctx)
+        
+        channel_id = ctx.channel.id
+        if channel_id not in self.deleted_messages:
+            await ctx.send("❌ No recently deleted messages found.", delete_after=5)
+            return
+        
+        deleted_msg = self.deleted_messages[channel_id]
+        embed = discord.Embed(
+            title="🎯 Sniped Message",
+            description=deleted_msg['content'] or "*No content*",
+            color=discord.Color.orange(),
+            timestamp=deleted_msg['created_at']
+        )
+        embed.set_author(
+            name=deleted_msg['author'].display_name,
+            icon_url=deleted_msg['author'].display_avatar.url
+        )
+        await ctx.send(embed=embed)
 
 async def setup(bot):
     """Setup function for the cog."""

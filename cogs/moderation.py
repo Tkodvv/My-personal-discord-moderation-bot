@@ -19,6 +19,13 @@ class ModerationCog(commands.Cog):
         self.bot = bot
         self.logger = logging.getLogger(__name__)
     
+    async def delete_command_message(self, ctx):
+        """Helper to delete the command message."""
+        try:
+            await ctx.message.delete()
+        except (discord.NotFound, discord.Forbidden):
+            pass
+    
     @app_commands.command(name="kick", description="Kick a member from the server")
     @app_commands.describe(
         member="The member to kick",
@@ -296,6 +303,65 @@ class ModerationCog(commands.Cog):
         except discord.HTTPException as e:
             await interaction.response.send_message(f"❌ Failed to unban user: {e}", ephemeral=True)
             self.logger.error(f"Failed to unban user {user_id}: {e}")
+    
+    # Prefix command versions (auto-delete)
+    @commands.command(name="kick")
+    async def prefix_kick(self, ctx, member: discord.Member, *, reason="No reason provided"):
+        """Prefix version of kick command."""
+        await self.delete_command_message(ctx)
+        
+        if not isinstance(ctx.author, discord.Member) or not ctx.guild:
+            return
+            
+        if not has_moderation_permissions(ctx.author, member):
+            await ctx.send("❌ You don't have permission to kick this member.", delete_after=5)
+            return
+        
+        if not has_higher_role(ctx.guild.me, member):
+            await ctx.send("❌ I cannot kick this member due to role hierarchy.", delete_after=5)
+            return
+        
+        try:
+            await member.kick(reason=f"Kicked by {ctx.author}: {reason}")
+            embed = discord.Embed(
+                title="Member Kicked",
+                description=f"**{member.display_name}** has been kicked.",
+                color=discord.Color.orange(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            await ctx.send(embed=embed)
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to kick this member.", delete_after=5)
+    
+    @commands.command(name="ban")
+    async def prefix_ban(self, ctx, member: discord.Member, *, reason="No reason provided"):
+        """Prefix version of ban command."""
+        await self.delete_command_message(ctx)
+        
+        if not isinstance(ctx.author, discord.Member) or not ctx.guild:
+            return
+            
+        if not has_moderation_permissions(ctx.author, member):
+            await ctx.send("❌ You don't have permission to ban this member.", delete_after=5)
+            return
+        
+        if not has_higher_role(ctx.guild.me, member):
+            await ctx.send("❌ I cannot ban this member due to role hierarchy.", delete_after=5)
+            return
+        
+        try:
+            await member.ban(reason=f"Banned by {ctx.author}: {reason}")
+            embed = discord.Embed(
+                title="Member Banned",
+                description=f"**{member.display_name}** has been banned.",
+                color=discord.Color.red(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(name="Reason", value=reason, inline=False)
+            await ctx.send(embed=embed)
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to ban this member.", delete_after=5)
 
 async def setup(bot):
     """Setup function for the cog."""

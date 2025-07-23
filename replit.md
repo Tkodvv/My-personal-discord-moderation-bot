@@ -46,6 +46,23 @@ Preferred communication style: Simple, everyday language.
 - **Commands**: say, announce, clear, snipe, setprefix
 - **Features**: Message management, announcements, deleted message tracking
 
+### Command Interface
+
+#### Dual Command System
+- **Slash Commands** (`/command`): Modern Discord interface with autocomplete and ephemeral responses
+- **Prefix Commands** (`!command`): Traditional commands with auto-delete functionality
+- **Auto-Delete**: Prefix commands automatically delete the command message for cleaner chat
+
+#### Available Prefix Commands
+- `!kick @member [reason]` - Auto-deleting kick command
+- `!ban @member [reason]` - Auto-deleting ban command  
+- `!say <message>` - Auto-deleting say command
+- `!clear <amount> [@member]` - Auto-deleting clear command
+- `!snipe` - Auto-deleting snipe command
+- `!userinfo [@member]` (alias: `!ui`) - Auto-deleting user info
+- `!avatar [@member]` (alias: `!av`) - Auto-deleting avatar display
+- `!ping` - Auto-deleting ping command
+
 ### Utility Systems
 
 #### Logging (`utils/logging_config.py`)

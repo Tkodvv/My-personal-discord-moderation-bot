@@ -18,6 +18,13 @@ class UtilityCog(commands.Cog):
         self.logger = logging.getLogger(__name__)
         self.start_time = datetime.utcnow()
     
+    async def delete_command_message(self, ctx):
+        """Helper to delete the command message."""
+        try:
+            await ctx.message.delete()
+        except (discord.NotFound, discord.Forbidden):
+            pass
+    
     @app_commands.command(name="userinfo", description="Get information about a user")
     @app_commands.describe(member="The member to get information about")
     async def userinfo(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
@@ -301,6 +308,65 @@ class UtilityCog(commands.Cog):
         embed.set_footer(text=f"Requested by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
         
         await interaction.response.send_message(embed=embed)
+    
+    # Prefix command versions (auto-delete)
+    @commands.command(name="userinfo", aliases=["ui"])
+    async def prefix_userinfo(self, ctx, member: Optional[discord.Member] = None):
+        """Prefix version of userinfo command."""
+        await self.delete_command_message(ctx)
+        
+        if member is None:
+            member = ctx.author
+        
+        if not isinstance(member, discord.Member):
+            await ctx.send("❌ User information is only available for server members.", delete_after=5)
+            return
+        
+        embed = discord.Embed(
+            title=f"User Information - {member.display_name}",
+            color=member.color if member.color != discord.Color.default() else discord.Color.blue(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Username", value=f"{member.name}#{member.discriminator}", inline=True)
+        embed.add_field(name="User ID", value=member.id, inline=True)
+        embed.add_field(name="Status", value=member.status.name.title(), inline=True)
+        
+        await ctx.send(embed=embed)
+    
+    @commands.command(name="avatar", aliases=["av"])
+    async def prefix_avatar(self, ctx, member: Optional[discord.Member] = None):
+        """Prefix version of avatar command."""
+        await self.delete_command_message(ctx)
+        
+        if member is None:
+            member = ctx.author
+        
+        if not isinstance(member, discord.Member):
+            await ctx.send("❌ Avatar information is only available for server members.", delete_after=5)
+            return
+        
+        embed = discord.Embed(
+            title=f"{member.display_name}'s Avatar",
+            color=member.color if member.color != discord.Color.default() else discord.Color.blue(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_image(url=member.display_avatar.url)
+        await ctx.send(embed=embed)
+    
+    @commands.command(name="ping")
+    async def prefix_ping(self, ctx):
+        """Prefix version of ping command."""
+        await self.delete_command_message(ctx)
+        
+        latency = round(self.bot.latency * 1000)
+        embed = discord.Embed(
+            title="🏓 Pong!",
+            color=discord.Color.green(),
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(name="Latency", value=f"{latency}ms", inline=True)
+        await ctx.send(embed=embed)
 
 async def setup(bot):
     """Setup function for the cog."""
