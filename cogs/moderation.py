@@ -7,7 +7,7 @@ import logging
 import discord
 from discord.ext import commands
 from discord import app_commands
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional
 
 from utils.permissions import has_moderation_permissions, has_higher_role
@@ -52,7 +52,7 @@ class ModerationCog(commands.Cog):
                 title="Member Kicked",
                 description=f"**{member.display_name}** has been kicked from the server.",
                 color=discord.Color.orange(),
-                timestamp=datetime.utcnow()
+                timestamp=discord.utils.utcnow()
             )
             embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=True)
             embed.add_field(name="Moderator", value=f"{interaction.user.mention}", inline=True)
@@ -109,7 +109,7 @@ class ModerationCog(commands.Cog):
                 title="Member Banned",
                 description=f"**{member.display_name}** has been banned from the server.",
                 color=discord.Color.red(),
-                timestamp=datetime.utcnow()
+                timestamp=discord.utils.utcnow()
             )
             embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=True)
             embed.add_field(name="Moderator", value=f"{interaction.user.mention}", inline=True)
@@ -160,8 +160,8 @@ class ModerationCog(commands.Cog):
             return
         
         try:
-            # Calculate timeout until time
-            timeout_until = datetime.utcnow() + timedelta(minutes=duration)
+            # Calculate timeout until time (timezone-aware)
+            timeout_until = discord.utils.utcnow() + timedelta(minutes=duration)
             
             # Log the action
             self.logger.info(f"Timeout command used by {interaction.user} on {member} for {duration} minutes in {interaction.guild.name}")
@@ -171,7 +171,7 @@ class ModerationCog(commands.Cog):
                 title="Member Timed Out",
                 description=f"**{member.display_name}** has been timed out.",
                 color=discord.Color.yellow(),
-                timestamp=datetime.utcnow()
+                timestamp=discord.utils.utcnow()
             )
             embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=True)
             embed.add_field(name="Moderator", value=f"{interaction.user.mention}", inline=True)
@@ -221,7 +221,7 @@ class ModerationCog(commands.Cog):
                 title="Timeout Removed",
                 description=f"**{member.display_name}**'s timeout has been removed.",
                 color=discord.Color.green(),
-                timestamp=datetime.utcnow()
+                timestamp=discord.utils.utcnow()
             )
             embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=True)
             embed.add_field(name="Moderator", value=f"{interaction.user.mention}", inline=True)
@@ -275,7 +275,7 @@ class ModerationCog(commands.Cog):
                 title="User Unbanned",
                 description=f"**{user.display_name}** has been unbanned from the server.",
                 color=discord.Color.green(),
-                timestamp=datetime.utcnow()
+                timestamp=discord.utils.utcnow()
             )
             embed.add_field(name="User", value=f"{user.mention} ({user.id})", inline=True)
             embed.add_field(name="Moderator", value=f"{interaction.user.mention}", inline=True)
