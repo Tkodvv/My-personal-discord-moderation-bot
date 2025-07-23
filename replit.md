@@ -100,9 +100,15 @@ pip install discord.py python-dotenv
 
 ### Configuration Requirements
 1. Create Discord application and bot
-2. Set `DISCORD_TOKEN` in environment or `.env` file
+2. Set `DISCORD_TOKEN` in `.env` file (template provided)
 3. Configure bot permissions in Discord Developer Portal
 4. Invite bot to server with appropriate permissions
+
+### Windows Support
+- `start.bat` script for easy Windows deployment
+- Automatic dependency installation
+- Error checking and user-friendly messages
+- `.env` file validation
 
 ## Notes for Development
 
