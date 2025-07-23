@@ -32,6 +32,10 @@ class UtilityCog(commands.Cog):
                 await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
                 return
         
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message("❌ User information is only available for server members.", ephemeral=True)
+            return
+        
         # Create embed with user information
         embed = discord.Embed(
             title=f"User Information - {member.display_name}",

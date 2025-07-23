@@ -79,8 +79,16 @@ class ModerationCog(commands.Cog):
     async def ban(self, interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided", delete_messages: Optional[int] = 0):
         """Ban a member from the server."""
         # Validate delete_messages parameter
-        if delete_messages < 0 or delete_messages > 7:
+        if delete_messages is not None and (delete_messages < 0 or delete_messages > 7):
             await interaction.response.send_message("❌ Delete messages must be between 0 and 7 days.", ephemeral=True)
+            return
+        
+        if not interaction.guild:
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+            
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
             return
         
         # Check permissions
@@ -111,7 +119,7 @@ class ModerationCog(commands.Cog):
             embed.set_thumbnail(url=member.display_avatar.url)
             
             # Perform the ban
-            await member.ban(reason=f"Banned by {interaction.user}: {reason}", delete_message_days=delete_messages)
+            await member.ban(reason=f"Banned by {interaction.user}: {reason}", delete_message_days=delete_messages or 0)
             
             await interaction.response.send_message(embed=embed)
             
@@ -132,6 +140,14 @@ class ModerationCog(commands.Cog):
         # Validate duration (max 28 days = 40320 minutes)
         if duration <= 0 or duration > 40320:
             await interaction.response.send_message("❌ Duration must be between 1 and 40320 minutes (28 days).", ephemeral=True)
+            return
+        
+        if not interaction.guild:
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+            
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
             return
         
         # Check permissions
@@ -187,6 +203,10 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ This member is not currently timed out.", ephemeral=True)
             return
         
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
+            return
+        
         # Check permissions
         if not has_moderation_permissions(interaction.user, member):
             await interaction.response.send_message("❌ You don't have permission to remove timeout from this member.", ephemeral=True)
@@ -226,6 +246,10 @@ class ModerationCog(commands.Cog):
     )
     async def unban(self, interaction: discord.Interaction, user_id: str, reason: Optional[str] = "No reason provided"):
         """Unban a user from the server."""
+        if not isinstance(interaction.user, discord.Member) or not interaction.guild:
+            await interaction.response.send_message("❌ This command can only be used by server members.", ephemeral=True)
+            return
+            
         # Check permissions
         if not interaction.user.guild_permissions.ban_members:
             await interaction.response.send_message("❌ You don't have permission to unban members.", ephemeral=True)
