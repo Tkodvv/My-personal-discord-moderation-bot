@@ -214,21 +214,8 @@ class AdminCog(commands.Cog):
             return
         
         try:
-            # Create embed for the DM
-            embed = discord.Embed(
-                title=f"Message from {interaction.guild.name}",
-                description=message,
-                color=discord.Color.blue(),
-                timestamp=discord.utils.utcnow()
-            )
-            embed.set_author(
-                name=f"Sent by {interaction.user.display_name}",
-                icon_url=interaction.user.display_avatar.url
-            )
-            embed.set_footer(text=f"From: {interaction.guild.name}", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
-            
-            # Send the DM
-            await user.send(embed=embed)
+            # Send the DM as a regular message
+            await user.send(message)
             
             # Confirm to the sender
             await interaction.response.send_message(f"✅ Direct message sent to {user.display_name}!", ephemeral=True)
@@ -323,21 +310,8 @@ class AdminCog(commands.Cog):
             return
         
         try:
-            # Create embed for the DM
-            embed = discord.Embed(
-                title=f"Message from {ctx.guild.name}",
-                description=message,
-                color=discord.Color.blue(),
-                timestamp=discord.utils.utcnow()
-            )
-            embed.set_author(
-                name=f"Sent by {ctx.author.display_name}",
-                icon_url=ctx.author.display_avatar.url
-            )
-            embed.set_footer(text=f"From: {ctx.guild.name}", icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
-            
-            # Send the DM
-            await user.send(embed=embed)
+            # Send the DM as a regular message
+            await user.send(message)
             
             # Confirm to the sender
             confirmation = await ctx.send(f"✅ Direct message sent to {user.display_name}!")
