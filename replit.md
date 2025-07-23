@@ -38,13 +38,13 @@ Preferred communication style: Simple, everyday language.
 
 #### Utility Cog (`cogs/utility.py`)
 - **Purpose**: Provides informational and utility commands
-- **Commands**: userinfo, avatar, serverinfo, ping, roleinfo, uptime
-- **Features**: Rich embed formatting, optional parameters, uptime tracking
+- **Commands**: userinfo, avatar, serverinfo, ping, roleinfo, uptime, joined, roles, whois, stats
+- **Features**: Rich embed formatting, optional parameters, uptime tracking, comprehensive user/server information
 
 #### Admin Cog (`cogs/admin.py`)
 - **Purpose**: Administrative commands for server management
-- **Commands**: say, announce, clear, snipe, setprefix, dm
-- **Features**: Message management, announcements, deleted message tracking, direct messaging
+- **Commands**: say, announce, clear, snipe, setprefix, dm, setnick, addrole, watchuser
+- **Features**: Message management, announcements, deleted message tracking, direct messaging, role management, user monitoring
 
 ### Command Interface
 

@@ -18,6 +18,10 @@ A comprehensive Discord moderation bot built with Python and discord.py v2.3+, f
 - `/roleinfo` - Detailed role information and permissions
 - `/ping` or `!ping` - Check bot latency and response time
 - `/uptime` - Show how long the bot has been running
+- `/joined` - Show when a member joined the server
+- `/roles` - Show all server roles or a specific member's roles
+- `/whois` - Detailed information about any user
+- `/stats` - Comprehensive server statistics
 
 ### ⚙️ Administrative Commands
 - `/say` or `!say` - Make the bot send custom messages
@@ -26,6 +30,9 @@ A comprehensive Discord moderation bot built with Python and discord.py v2.3+, f
 - `/snipe` or `!snipe` - View recently deleted messages
 - `/setprefix` - Change the bot's command prefix
 - `/dm` or `!dm` - Send direct messages to any user
+- `/setnick` - Change a member's nickname
+- `/addrole` - Add roles to members
+- `/watchuser` - Add users to monitoring watch list
 
 ### 🎛️ Command Types
 - **Slash Commands** (`/command`) - Modern Discord interface with autocomplete

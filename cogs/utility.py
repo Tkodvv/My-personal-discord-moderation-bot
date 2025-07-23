@@ -309,6 +309,164 @@ class UtilityCog(commands.Cog):
         
         await interaction.response.send_message(embed=embed)
     
+    @app_commands.command(name="joined", description="Show when a member joined the server")
+    @app_commands.describe(member="The member to check join date for")
+    async def joined(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
+        """Show when a member joined the server."""
+        if member is None:
+            member = interaction.user
+        
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message("❌ Join information is only available for server members.", ephemeral=True)
+            return
+        
+        embed = discord.Embed(
+            title=f"Join Information - {member.display_name}",
+            color=member.color if member.color != discord.Color.default() else discord.Color.blue(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="Joined Server", value=f"<t:{int(member.joined_at.timestamp())}:F>", inline=False)
+        embed.add_field(name="Account Created", value=f"<t:{int(member.created_at.timestamp())}:F>", inline=False)
+        
+        # Calculate days since joining
+        days_since_join = (datetime.utcnow() - member.joined_at.replace(tzinfo=None)).days
+        embed.add_field(name="Days in Server", value=f"{days_since_join} days", inline=True)
+        
+        await interaction.response.send_message(embed=embed)
+    
+    @app_commands.command(name="roles", description="Show all roles in the server or a specific member's roles")
+    @app_commands.describe(member="The member to show roles for (optional)")
+    async def roles(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
+        """Show server roles or a member's roles."""
+        if member:
+            # Show specific member's roles
+            if len(member.roles) <= 1:  # @everyone role only
+                embed = discord.Embed(
+                    title=f"{member.display_name}'s Roles",
+                    description="This member has no special roles.",
+                    color=discord.Color.blue()
+                )
+            else:
+                roles = [role.mention for role in reversed(member.roles[1:])]  # Skip @everyone
+                embed = discord.Embed(
+                    title=f"{member.display_name}'s Roles",
+                    description="\n".join(roles),
+                    color=member.color if member.color != discord.Color.default() else discord.Color.blue()
+                )
+                embed.add_field(name="Role Count", value=len(member.roles) - 1, inline=True)
+        else:
+            # Show all server roles
+            guild_roles = [role for role in reversed(interaction.guild.roles[1:])]  # Skip @everyone
+            if not guild_roles:
+                embed = discord.Embed(
+                    title=f"{interaction.guild.name} Roles",
+                    description="This server has no special roles.",
+                    color=discord.Color.blue()
+                )
+            else:
+                roles_text = "\n".join([f"{role.mention} - {len(role.members)} members" for role in guild_roles[:20]])  # Limit to 20
+                if len(guild_roles) > 20:
+                    roles_text += f"\n... and {len(guild_roles) - 20} more roles"
+                
+                embed = discord.Embed(
+                    title=f"{interaction.guild.name} Roles",
+                    description=roles_text,
+                    color=discord.Color.blue()
+                )
+                embed.add_field(name="Total Roles", value=len(guild_roles), inline=True)
+        
+        await interaction.response.send_message(embed=embed)
+    
+    @app_commands.command(name="whois", description="Detailed information about a user")
+    @app_commands.describe(user="The user to get information about")
+    async def whois(self, interaction: discord.Interaction, user: discord.User):
+        """Get detailed information about a user."""
+        embed = discord.Embed(
+            title=f"User Information - {user.display_name}",
+            color=discord.Color.blue(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        
+        # Basic info
+        embed.add_field(name="Username", value=f"{user.name}#{user.discriminator}", inline=True)
+        embed.add_field(name="User ID", value=user.id, inline=True)
+        embed.add_field(name="Created", value=f"<t:{int(user.created_at.timestamp())}:F>", inline=False)
+        
+        # If it's a member of this guild, add more info
+        if isinstance(user, discord.Member):
+            embed.add_field(name="Joined", value=f"<t:{int(user.joined_at.timestamp())}:F>", inline=False)
+            embed.add_field(name="Status", value=user.status.name.title(), inline=True)
+            embed.add_field(name="Top Role", value=user.top_role.mention, inline=True)
+            embed.add_field(name="Role Count", value=len(user.roles) - 1, inline=True)
+            
+            if user.premium_since:
+                embed.add_field(name="Boosting Since", value=f"<t:{int(user.premium_since.timestamp())}:F>", inline=False)
+        
+        embed.add_field(name="Bot Account", value="Yes" if user.bot else "No", inline=True)
+        
+        await interaction.response.send_message(embed=embed)
+    
+    @app_commands.command(name="stats", description="Show server statistics")
+    async def stats(self, interaction: discord.Interaction):
+        """Show detailed server statistics."""
+        guild = interaction.guild
+        
+        # Count members by status
+        online = sum(1 for member in guild.members if member.status == discord.Status.online)
+        idle = sum(1 for member in guild.members if member.status == discord.Status.idle)
+        dnd = sum(1 for member in guild.members if member.status == discord.Status.dnd)
+        offline = sum(1 for member in guild.members if member.status == discord.Status.offline)
+        
+        # Count channels
+        text_channels = len(guild.text_channels)
+        voice_channels = len(guild.voice_channels)
+        categories = len(guild.categories)
+        
+        # Count bots vs humans
+        bots = sum(1 for member in guild.members if member.bot)
+        humans = guild.member_count - bots
+        
+        embed = discord.Embed(
+            title=f"{guild.name} Statistics",
+            color=discord.Color.blue(),
+            timestamp=datetime.utcnow()
+        )
+        embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
+        
+        # Member stats
+        embed.add_field(
+            name="👥 Members",
+            value=f"Total: {guild.member_count}\nHumans: {humans}\nBots: {bots}",
+            inline=True
+        )
+        
+        # Status stats
+        embed.add_field(
+            name="📊 Status",
+            value=f"🟢 Online: {online}\n🟡 Idle: {idle}\n🔴 DND: {dnd}\n⚫ Offline: {offline}",
+            inline=True
+        )
+        
+        # Channel stats
+        embed.add_field(
+            name="📋 Channels",
+            value=f"Text: {text_channels}\nVoice: {voice_channels}\nCategories: {categories}",
+            inline=True
+        )
+        
+        # Server info
+        embed.add_field(name="📅 Created", value=f"<t:{int(guild.created_at.timestamp())}:F>", inline=False)
+        embed.add_field(name="👑 Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
+        embed.add_field(name="🎭 Roles", value=len(guild.roles), inline=True)
+        embed.add_field(name="😀 Emojis", value=len(guild.emojis), inline=True)
+        
+        if guild.premium_subscription_count:
+            embed.add_field(name="💎 Boosts", value=f"{guild.premium_subscription_count} (Level {guild.premium_tier})", inline=True)
+        
+        await interaction.response.send_message(embed=embed)
+    
     # Prefix command versions (auto-delete)
     @commands.command(name="userinfo", aliases=["ui"])
     async def prefix_userinfo(self, ctx, member: Optional[discord.Member] = None):
