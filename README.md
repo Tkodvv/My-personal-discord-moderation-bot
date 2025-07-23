@@ -5,26 +5,30 @@ A comprehensive Discord moderation bot built with Python and discord.py v2.3+, f
 ## Features
 
 ### 🛡️ Moderation Commands
-- `/kick` - Remove members from the server
-- `/ban` - Ban members with optional message deletion
+- `/kick` or `!kick` - Remove members from the server
+- `/ban` or `!ban` - Ban members with optional message deletion
 - `/timeout` - Temporarily restrict member access (up to 28 days)
 - `/untimeout` - Remove timeout from members
 - `/unban` - Restore access to banned users
 
 ### 📊 Utility Commands
-- `/userinfo` - Detailed member information and statistics
-- `/avatar` - High-resolution avatar display with download links
+- `/userinfo` or `!userinfo` (`!ui`) - Detailed member information and statistics
+- `/avatar` or `!avatar` (`!av`) - High-resolution avatar display with download links
 - `/serverinfo` - Complete server information and statistics
 - `/roleinfo` - Detailed role information and permissions
-- `/ping` - Check bot latency and response time
+- `/ping` or `!ping` - Check bot latency and response time
 - `/uptime` - Show how long the bot has been running
 
 ### ⚙️ Administrative Commands
-- `/say` - Make the bot send custom messages
+- `/say` or `!say` - Make the bot send custom messages
 - `/announce` - Send formatted announcement embeds
-- `/clear` - Delete messages with optional user filtering
-- `/snipe` - View recently deleted messages
+- `/clear` or `!clear` - Delete messages with optional user filtering
+- `/snipe` or `!snipe` - View recently deleted messages
 - `/setprefix` - Change the bot's command prefix
+
+### 🎛️ Command Types
+- **Slash Commands** (`/command`) - Modern Discord interface with autocomplete
+- **Prefix Commands** (`!command`) - Traditional commands that auto-delete after use
 
 ## Setup Instructions
 

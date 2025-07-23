@@ -27,7 +27,7 @@ class DiscordBot(commands.Bot):
         
         # Initialize bot
         super().__init__(
-            command_prefix='!',  # Fallback prefix (slash commands are primary)
+            command_prefix='!',  # Prefix commands with auto-delete
             intents=intents,
             help_command=None,
             case_insensitive=True
