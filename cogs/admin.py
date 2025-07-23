@@ -197,6 +197,51 @@ class AdminCog(commands.Cog):
         
         await interaction.response.send_message(embed=embed)
     
+    @app_commands.command(name="dm", description="Send a direct message to a user")
+    @app_commands.describe(
+        user="The user to send a DM to",
+        message="The message to send"
+    )
+    async def dm_user(self, interaction: discord.Interaction, user: discord.User, *, message: str):
+        """Send a direct message to a user."""
+        # Check permissions
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+            
+        if not interaction.user.guild_permissions.manage_messages:
+            await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+            return
+        
+        try:
+            # Create embed for the DM
+            embed = discord.Embed(
+                title=f"Message from {interaction.guild.name}",
+                description=message,
+                color=discord.Color.blue(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.set_author(
+                name=f"Sent by {interaction.user.display_name}",
+                icon_url=interaction.user.display_avatar.url
+            )
+            embed.set_footer(text=f"From: {interaction.guild.name}", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+            
+            # Send the DM
+            await user.send(embed=embed)
+            
+            # Confirm to the sender
+            await interaction.response.send_message(f"✅ Direct message sent to {user.display_name}!", ephemeral=True)
+            
+            # Log the action
+            self.logger.info(f"DM sent to {user} by {interaction.user} in {interaction.guild.name}: {message}")
+            
+        except discord.Forbidden:
+            await interaction.response.send_message(f"❌ Could not send DM to {user.display_name}. They may have DMs disabled or blocked the bot.", ephemeral=True)
+        except discord.HTTPException as e:
+            await interaction.response.send_message(f"❌ Failed to send DM: {e}", ephemeral=True)
+            self.logger.error(f"Failed to send DM to {user}: {e}")
+    
     # Prefix command versions (auto-delete)
     @commands.command(name="say")
     async def prefix_say(self, ctx, *, message):
@@ -264,6 +309,48 @@ class AdminCog(commands.Cog):
             icon_url=deleted_msg['author'].display_avatar.url
         )
         await ctx.send(embed=embed)
+    
+    @commands.command(name="dm")
+    async def prefix_dm(self, ctx, user: discord.User, *, message):
+        """Prefix version of dm command."""
+        await self.delete_command_message(ctx)
+        
+        if not isinstance(ctx.author, discord.Member):
+            return
+            
+        if not ctx.author.guild_permissions.manage_messages:
+            await ctx.send("❌ You don't have permission to use this command.", delete_after=5)
+            return
+        
+        try:
+            # Create embed for the DM
+            embed = discord.Embed(
+                title=f"Message from {ctx.guild.name}",
+                description=message,
+                color=discord.Color.blue(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.set_author(
+                name=f"Sent by {ctx.author.display_name}",
+                icon_url=ctx.author.display_avatar.url
+            )
+            embed.set_footer(text=f"From: {ctx.guild.name}", icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
+            
+            # Send the DM
+            await user.send(embed=embed)
+            
+            # Confirm to the sender
+            confirmation = await ctx.send(f"✅ Direct message sent to {user.display_name}!")
+            await confirmation.delete(delay=3)
+            
+            # Log the action
+            self.logger.info(f"DM sent to {user} by {ctx.author} in {ctx.guild.name}: {message}")
+            
+        except discord.Forbidden:
+            await ctx.send(f"❌ Could not send DM to {user.display_name}. They may have DMs disabled or blocked the bot.", delete_after=5)
+        except discord.HTTPException as e:
+            await ctx.send(f"❌ Failed to send DM: {e}", delete_after=5)
+            self.logger.error(f"Failed to send DM to {user}: {e}")
 
 async def setup(bot):
     """Setup function for the cog."""
