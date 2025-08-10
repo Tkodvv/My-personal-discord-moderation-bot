@@ -739,8 +739,34 @@ class UtilityCog(commands.Cog):
             await interaction.response.send_message(f"❌ Error: `{e}`", ephemeral=True)
 
     # =========================
-    # Existing utility commands
+    # Existing utility commands (+ /health)
     # =========================
+    @app_commands.command(name="health", description="Show bot health: ping, servers, uptime")
+    async def health(self, interaction: discord.Interaction):
+        """Bot health overview with ping + server count + uptime."""
+        latency = round(self.bot.latency * 1000)
+        servers = len(self.bot.guilds)
+        uptime_duration = utcnow() - self.start_time
+        days = uptime_duration.days
+        hours, remainder = divmod(uptime_duration.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        parts = []
+        if days > 0:
+            parts.append(f"{days}d")
+        if hours > 0:
+            parts.append(f"{hours}h")
+        if minutes > 0:
+            parts.append(f"{minutes}m")
+        parts.append(f"{seconds}s")
+        uptime_text = " ".join(parts)
+
+        embed = discord.Embed(title="🩺 Bot Health", color=discord.Color.green())
+        embed.add_field(name="Ping", value=f"{latency}ms", inline=True)
+        embed.add_field(name="Servers", value=str(servers), inline=True)
+        embed.add_field(name="Uptime", value=uptime_text, inline=False)
+        embed.add_field(name="Started", value=format_dt(self.start_time, style="F"), inline=False)
+        await interaction.response.send_message(embed=embed)
+
     @app_commands.command(name="userinfo", description="Get information about a user")
     @app_commands.describe(member="The member to get information about")
     async def userinfo(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
@@ -1225,6 +1251,33 @@ class UtilityCog(commands.Cog):
             color=discord.Color.green()
         )
         embed.add_field(name="Latency", value=f"{latency}ms", inline=True)
+        await ctx.send(embed=embed)
+
+    @commands.command(name="health")
+    async def prefix_health(self, ctx):
+        """Prefix version of health (auto-deletes invoke)."""
+        await self.delete_command_message(ctx)
+        latency = round(self.bot.latency * 1000)
+        servers = len(self.bot.guilds)
+        uptime_duration = utcnow() - self.start_time
+        days = uptime_duration.days
+        hours, remainder = divmod(uptime_duration.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        parts = []
+        if days > 0:
+            parts.append(f"{days}d")
+        if hours > 0:
+            parts.append(f"{hours}h")
+        if minutes > 0:
+            parts.append(f"{minutes}m")
+        parts.append(f"{seconds}s")
+        uptime_text = " ".join(parts)
+
+        embed = discord.Embed(title="🩺 Bot Health", color=discord.Color.green())
+        embed.add_field(name="Ping", value=f"{latency}ms", inline=True)
+        embed.add_field(name="Servers", value=str(servers), inline=True)
+        embed.add_field(name="Uptime", value=uptime_text, inline=False)
+        embed.add_field(name="Started", value=format_dt(self.start_time, style="F"), inline=False)
         await ctx.send(embed=embed)
 
 
