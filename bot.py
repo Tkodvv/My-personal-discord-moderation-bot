@@ -10,6 +10,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from typing import Dict, List, Set
+from discord.utils import utcnow, format_dt  # <-- added
 
 # === OPTIONAL: Legacy global role IDs fallback ===
 ALLOWED_ROLE_IDS = {
@@ -48,6 +49,10 @@ class DiscordBot(commands.Bot):
         )
 
         self.logger = logging.getLogger(__name__)
+
+        # health/uptime tracking
+        self.boot_time = utcnow()        # <-- added
+        self.last_sync_time = None       # <-- added
 
         # Per‑guild whitelist storage: { "<guild_id>": [role_id, ...] }
         self.mod_whitelist: Dict[str, List[int]] = {}
@@ -153,6 +158,10 @@ class DiscordBot(commands.Bot):
         # Slash commands: global gate
         @self.tree.interaction_check
         async def _global_slash_gate(interaction: discord.Interaction) -> bool:
+            # allow /health for everyone so you can always check status
+            if interaction.command and interaction.command.name == "health":
+                return True
+
             if interaction.guild is None:
                 try:
                     await interaction.response.send_message("❌ Commands can only be used in a server.", ephemeral=True)
@@ -182,6 +191,7 @@ class DiscordBot(commands.Bot):
         # Sync slash commands
         try:
             synced = await self.tree.sync()
+            self.last_sync_time = utcnow()  # <-- added
             self.logger.info("Synced %d slash commands", len(synced))
         except Exception as e:
             self.logger.error(f"Failed to sync slash commands: {e}")
@@ -239,3 +249,44 @@ class DiscordBot(commands.Bot):
                 await interaction.response.send_message("❌ An error occurred while executing the command.", ephemeral=True)
             else:
                 await interaction.followup.send("❌ An error occurred while executing the command.", ephemeral=True)
+
+    # ---------- /health (public) ----------
+    @app_commands.command(name="health", description="Show bot health / status.")
+    async def health(self, interaction: discord.Interaction):
+        """Public health check: latency, uptime, guild/shard counts, last sync."""
+        latency_ms = round(self.latency * 1000)
+        guild_count = len(self.guilds)
+        shard_info = (
+            f"{self.shard_id + 1}/{self.shard_count}"
+            if self.shard_id is not None and self.shard_count
+            else "—"
+        )
+
+        delta = utcnow() - self.boot_time
+        days = delta.days
+        hours, rem = divmod(delta.seconds, 3600)
+        minutes, seconds = divmod(rem, 60)
+        parts = []
+        if days: parts.append(f"{days}d")
+        if hours: parts.append(f"{hours}h")
+        if minutes: parts.append(f"{minutes}m")
+        parts.append(f"{seconds}s")
+        uptime_str = " ".join(parts)
+
+        embed = discord.Embed(
+            title="✅ Bot Health",
+            color=discord.Color.green(),
+            description="The bot is running and connected to Discord."
+        )
+        if self.user:
+            embed.set_author(name=str(self.user), icon_url=self.user.display_avatar.url)
+
+        embed.add_field(name="Latency", value=f"{latency_ms} ms", inline=True)
+        embed.add_field(name="Guilds", value=str(guild_count), inline=True)
+        embed.add_field(name="Shard", value=shard_info, inline=True)
+        embed.add_field(name="Uptime", value=uptime_str, inline=True)
+        embed.add_field(name="Started", value=format_dt(self.boot_time, style='F'), inline=True)
+        if self.last_sync_time:
+            embed.add_field(name="Last Slash Sync", value=format_dt(self.last_sync_time, style='R'), inline=True)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
