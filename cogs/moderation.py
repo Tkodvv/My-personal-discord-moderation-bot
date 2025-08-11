@@ -16,12 +16,11 @@ from utils.permissions import has_moderation_permissions, has_higher_role
 
 class ModerationCog(commands.Cog):
     """Moderation commands cog."""
-    
+
     def __init__(self, bot):
         self.bot = bot
         self.logger = logging.getLogger(__name__)
 
-    # -------- small helpers --------
     async def delete_command_message(self, ctx):
         """Helper to delete the command message."""
         try:
@@ -29,11 +28,13 @@ class ModerationCog(commands.Cog):
         except (discord.NotFound, discord.Forbidden):
             pass
 
+    # ---------- tiny builder for compact Dyno-like embeds ----------
     def _dyno_style_embed(self, verb_past: str, target: discord.abc.User, reason: str) -> discord.Embed:
         """
-        Build a compact, Dyno-like embed:
-        - color: green (your main color)
+        Build a compact embed:
+        - color: green
         - description: "**name** was <verb>.\n***Reason:*** <reason>"
+        - footer will be added by caller (User ID only)
         """
         display = getattr(target, "display_name", getattr(target, "name", "User"))
         return discord.Embed(
@@ -42,445 +43,318 @@ class ModerationCog(commands.Cog):
             timestamp=discord.utils.utcnow()
         )
 
-    def _pretty_dt(self, dt) -> str:
-        """Make a human-friendly local time string for footers (footers don't render <t:...>)."""
-        try:
-            return dt.astimezone().strftime("%b %d, %Y %I:%M %p")
-        except Exception:
-            # fallback to ISO if tz conversion fails
-            return dt.strftime("%Y-%m-%d %H:%M")
+    # ==============================
+    # Slash commands
+    # ==============================
 
-    # --------------------
-    # KICK (DM + hide mod)
-    # --------------------
+    # Kick
     @app_commands.command(name="kick", description="Kick a member from the server")
-    @app_commands.describe(
-        member="The member to kick",
-        reason="Reason for the kick"
-    )
+    @app_commands.describe(member="The member to kick", reason="Reason for the kick")
     async def kick(self, interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
-        """Kick a member from the server."""
         if not interaction.guild:
-            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
-            return
-            
+            return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
         if not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
-            return
-            
-        # Check permissions
+            return await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
         if not has_moderation_permissions(interaction.user, member):
-            await interaction.response.send_message("❌ You don't have permission to kick this member.", ephemeral=True)
-            return
-        
+            return await interaction.response.send_message("❌ You don't have permission to kick this member.", ephemeral=True)
         if not has_higher_role(interaction.guild.me, member):
-            await interaction.response.send_message("❌ I cannot kick this member due to role hierarchy.", ephemeral=True)
-            return
+            return await interaction.response.send_message("❌ I cannot kick this member due to role hierarchy.", ephemeral=True)
 
-        # Try to DM first (best-effort)
+        # DM best-effort
         try:
-            dm_embed = discord.Embed(
+            dm = discord.Embed(
                 title=f"You were kicked from {interaction.guild.name}",
                 description=f"***Reason:*** {reason}",
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if interaction.guild.icon:
-                dm_embed.set_thumbnail(url=interaction.guild.icon.url)
-            await member.send(embed=dm_embed)
+                dm.set_thumbnail(url=interaction.guild.icon.url)
+            await member.send(embed=dm)
         except Exception:
             pass
-        
+
         try:
-            # Perform the kick
             await member.kick(reason=f"Kicked by staff: {reason}")
-            # Public confirmation (Dyno style)
-            embed = self._dyno_style_embed("kicked", member, reason)
-            embed.set_footer(text=f"User ID: {member.id}")
-            await interaction.response.send_message(embed=embed)
+            e = self._dyno_style_embed("kicked", member, reason)
+            e.set_footer(text=f"User ID: {member.id}")
+            await interaction.response.send_message(embed=e)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to kick this member.", ephemeral=True)
-        except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ Failed to kick member: {e}", ephemeral=True)
-            self.logger.error(f"Failed to kick {member}: {e}")
 
-    # --------------------
-    # BAN (DM + hide mod)
-    # --------------------
+    # Ban
     @app_commands.command(name="ban", description="Ban a member from the server")
     @app_commands.describe(
         member="The member to ban",
         reason="Reason for the ban",
         delete_messages="Number of days of messages to delete (0-7)"
     )
-    async def ban(
-        self,
-        interaction: discord.Interaction,
-        member: discord.Member,
-        reason: Optional[str] = "No reason provided",
-        delete_messages: Optional[int] = 0
-    ):
-        """Ban a member; DM them the reason; hide the moderator in the public message."""
-        # Validate delete_messages parameter
+    async def ban(self, interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided", delete_messages: Optional[int] = 0):
         if delete_messages is not None and (delete_messages < 0 or delete_messages > 7):
-            await interaction.response.send_message("❌ Delete messages must be between 0 and 7 days.", ephemeral=True)
-            return
-        
+            return await interaction.response.send_message("❌ Delete messages must be between 0 and 7 days.", ephemeral=True)
         if not interaction.guild:
-            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
-            return
-            
+            return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
         if not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
-            return
-        
-        # Check permissions
+            return await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
         if not has_moderation_permissions(interaction.user, member):
-            await interaction.response.send_message("❌ You don't have permission to ban this member.", ephemeral=True)
-            return
-        
+            return await interaction.response.send_message("❌ You don't have permission to ban this member.", ephemeral=True)
         if not has_higher_role(interaction.guild.me, member):
-            await interaction.response.send_message("❌ I cannot ban this member due to role hierarchy.", ephemeral=True)
-            return
-        
-        # Try to DM first (best-effort)
+            return await interaction.response.send_message("❌ I cannot ban this member due to role hierarchy.", ephemeral=True)
+
+        # DM best-effort
         try:
-            dm_embed = discord.Embed(
+            dm = discord.Embed(
                 title=f"You were banned from {interaction.guild.name}",
                 description=f"***Reason:*** {reason}",
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if interaction.guild.icon:
-                dm_embed.set_thumbnail(url=interaction.guild.icon.url)
-            await member.send(embed=dm_embed)
+                dm.set_thumbnail(url=interaction.guild.icon.url)
+            await member.send(embed=dm)
         except Exception:
             pass
-        
+
         try:
-            # Perform the ban
-            await member.ban(
-                reason=f"Banned by staff: {reason}",
-                delete_message_days=delete_messages or 0
-            )
-            # Public confirmation (Dyno style)
-            embed = self._dyno_style_embed("banned", member, reason)
-            extras = f" • Messages Deleted: {delete_messages} day(s)" if delete_messages else ""
-            embed.set_footer(text=f"User ID: {member.id}{extras}")
-            await interaction.response.send_message(embed=embed)  # public
+            await member.ban(reason=f"Banned by staff: {reason}", delete_message_days=delete_messages or 0)
+            e = self._dyno_style_embed("banned", member, reason)
+            if delete_messages:
+                e.description += f"\n***Messages Deleted:*** {delete_messages} day(s)"
+            e.set_footer(text=f"User ID: {member.id}")
+            await interaction.response.send_message(embed=e)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to ban this member.", ephemeral=True)
-        except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ Failed to ban member: {e}", ephemeral=True)
-            self.logger.error(f"Failed to ban {member}: {e}")
 
-    # --------------------
-    # TIMEOUT (DM + hide mod)
-    # --------------------
+    # Timeout
     @app_commands.command(name="timeout", description="Timeout a member")
-    @app_commands.describe(
-        member="The member to timeout",
-        duration="Duration in minutes (max 40320 = 28 days)",
-        reason="Reason for the timeout"
-    )
+    @app_commands.describe(member="The member to timeout", duration="Duration in minutes (max 40320 = 28 days)", reason="Reason for the timeout")
     async def timeout(self, interaction: discord.Interaction, member: discord.Member, duration: int, reason: Optional[str] = "No reason provided"):
-        """Timeout a member."""
         if duration <= 0 or duration > 40320:
-            await interaction.response.send_message("❌ Duration must be between 1 and 40320 minutes (28 days).", ephemeral=True)
-            return
-        
+            return await interaction.response.send_message("❌ Duration must be between 1 and 40320 minutes (28 days).", ephemeral=True)
         if not interaction.guild:
-            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
-            return
-            
+            return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
         if not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
-            return
-        
+            return await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
         if not has_moderation_permissions(interaction.user, member):
-            await interaction.response.send_message("❌ You don't have permission to timeout this member.", ephemeral=True)
-            return
-        
+            return await interaction.response.send_message("❌ You don't have permission to timeout this member.", ephemeral=True)
         if not has_higher_role(interaction.guild.me, member):
-            await interaction.response.send_message("❌ I cannot timeout this member due to role hierarchy.", ephemeral=True)
-            return
-        
-        timeout_until = discord.utils.utcnow() + timedelta(minutes=duration)
+            return await interaction.response.send_message("❌ I cannot timeout this member due to role hierarchy.", ephemeral=True)
 
-        # Try to DM first (best-effort)
+        until = discord.utils.utcnow() + timedelta(minutes=duration)
+
+        # DM best-effort
         try:
-            dm_embed = discord.Embed(
+            dm = discord.Embed(
                 title=f"You were timed out in {interaction.guild.name}",
                 description=(
                     f"***Duration:*** {duration} minutes\n"
-                    f"***Until:*** <t:{int(timeout_until.timestamp())}:F>\n"
+                    f"***Until:*** {discord.utils.format_dt(until, style='F')}\n"
                     f"***Reason:*** {reason}"
                 ),
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if interaction.guild.icon:
-                dm_embed.set_thumbnail(url=interaction.guild.icon.url)
-            await member.send(embed=dm_embed)
+                dm.set_thumbnail(url=interaction.guild.icon.url)
+            await member.send(embed=dm)
         except Exception:
             pass
-        
+
         try:
-            # Perform the timeout
-            await member.timeout(timeout_until, reason=f"Timed out by staff: {reason}")
-            # Public confirmation (Dyno style)
-            until_str = self._pretty_dt(timeout_until)
-            embed = self._dyno_style_embed("timed out", member, reason)
-            embed.set_footer(text=f"User ID: {member.id} • Until: {until_str} • Duration: {duration}m")
-            await interaction.response.send_message(embed=embed)
+            await member.timeout(until, reason=f"Timed out by staff: {reason}")
+            e = self._dyno_style_embed("timed out", member, reason)
+            # Put Until + Duration in the description for localization
+            e.description += f"\n***Until:*** {discord.utils.format_dt(until, style='F')} • ***Duration:*** {duration}m"
+            e.set_footer(text=f"User ID: {member.id}")
+            await interaction.response.send_message(embed=e)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to timeout this member.", ephemeral=True)
-        except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ Failed to timeout member: {e}", ephemeral=True)
-            self.logger.error(f"Failed to timeout {member}: {e}")
 
-    # --------------------
-    # UNTIMEOUT (DM + hide mod)
-    # --------------------
+    # Untimeout
     @app_commands.command(name="untimeout", description="Remove timeout from a member")
-    @app_commands.describe(
-        member="The member to remove timeout from",
-        reason="Reason for removing the timeout"
-    )
+    @app_commands.describe(member="The member to remove timeout from", reason="Reason for removing the timeout")
     async def untimeout(self, interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
-        """Remove timeout from a member."""
         if member.timed_out_until is None:
-            await interaction.response.send_message("❌ This member is not currently timed out.", ephemeral=True)
-            return
-        
+            return await interaction.response.send_message("❌ This member is not currently timed out.", ephemeral=True)
         if not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
-            return
-        
+            return await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
         if not has_moderation_permissions(interaction.user, member):
-            await interaction.response.send_message("❌ You don't have permission to remove timeout from this member.", ephemeral=True)
-            return
-        
-        # Try to DM (best-effort)
+            return await interaction.response.send_message("❌ You don't have permission to remove timeout from this member.", ephemeral=True)
+
+        # DM best-effort
         try:
-            dm_embed = discord.Embed(
+            dm = discord.Embed(
                 title=f"Your timeout was removed in {interaction.guild.name}",
                 description=f"***Reason:*** {reason}",
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if interaction.guild.icon:
-                dm_embed.set_thumbnail(url=interaction.guild.icon.url)
-            await member.send(embed=dm_embed)
+                dm.set_thumbnail(url=interaction.guild.icon.url)
+            await member.send(embed=dm)
         except Exception:
             pass
 
         try:
-            # Remove the timeout
             await member.timeout(None, reason=f"Timeout removed by staff: {reason}")
-            # Public confirmation (Dyno style)
-            embed = self._dyno_style_embed("had their timeout removed", member, reason)
-            embed.set_footer(text=f"User ID: {member.id}")
-            await interaction.response.send_message(embed=embed)
+            e = self._dyno_style_embed("had their timeout removed", member, reason)
+            e.set_footer(text=f"User ID: {member.id}")
+            await interaction.response.send_message(embed=e)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to remove timeout from this member.", ephemeral=True)
-        except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ Failed to remove timeout: {e}", ephemeral=True)
-            self.logger.error(f"Failed to remove timeout from {member}: {e}")
 
-    # --------------------
-    # UNBAN (slash)
-    # --------------------
+    # Unban (slash)
     @app_commands.command(name="unban", description="Unban a user from the server")
-    @app_commands.describe(
-        user_id="The ID of the user to unban",
-        reason="Reason for the unban"
-    )
+    @app_commands.describe(user_id="The ID of the user to unban", reason="Reason for the unban")
     async def unban(self, interaction: discord.Interaction, user_id: str, reason: Optional[str] = "No reason provided"):
-        """Unban a user from the server."""
         if not isinstance(interaction.user, discord.Member) or not interaction.guild:
-            await interaction.response.send_message("❌ This command can only be used by server members.", ephemeral=True)
-            return
-            
+            return await interaction.response.send_message("❌ This command can only be used by server members.", ephemeral=True)
         if not interaction.user.guild_permissions.ban_members:
-            await interaction.response.send_message("❌ You don't have permission to unban members.", ephemeral=True)
-            return
-        
+            return await interaction.response.send_message("❌ You don't have permission to unban members.", ephemeral=True)
+
         try:
-            user_id_int = int(user_id)
-            user = await self.bot.fetch_user(user_id_int)
+            uid = int(user_id)
+            user = await self.bot.fetch_user(uid)
             try:
                 await interaction.guild.fetch_ban(user)
             except discord.NotFound:
-                await interaction.response.send_message("❌ This user is not banned from this server.", ephemeral=True)
-                return
-            
-            # Do the unban
-            await interaction.guild.unban(user, reason=f"Unbanned by staff: {reason}")
+                return await interaction.response.send_message("❌ This user is not banned from this server.", ephemeral=True)
 
-            # Public confirmation (Dyno style)
-            embed = self._dyno_style_embed("unbanned", user, reason)
-            embed.set_footer(text=f"User ID: {user.id}")
-            await interaction.response.send_message(embed=embed)
-            
+            await interaction.guild.unban(user, reason=f"Unbanned by staff: {reason}")
+            e = self._dyno_style_embed("unbanned", user, reason)
+            e.set_footer(text=f"User ID: {user.id}")
+            await interaction.response.send_message(embed=e)
         except ValueError:
             await interaction.response.send_message("❌ Invalid user ID provided.", ephemeral=True)
         except discord.NotFound:
             await interaction.response.send_message("❌ User not found.", ephemeral=True)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to unban users.", ephemeral=True)
-        except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ Failed to unban user: {e}", ephemeral=True)
-            self.logger.error(f"Failed to unban user {user_id}: {e}")
 
-    # --------------------
-    # Prefix commands (auto-delete invoking message)
-    # --------------------
+    # ==============================
+    # Prefix commands (message)
+    # ==============================
+
     @commands.command(name="kick")
     async def prefix_kick(self, ctx, member: discord.Member, *, reason="No reason provided"):
-        """Prefix version of kick command."""
         await self.delete_command_message(ctx)
-        
         if not isinstance(ctx.author, discord.Member) or not ctx.guild:
             return
-            
         if not has_moderation_permissions(ctx.author, member):
-            await ctx.send("❌ You don't have permission to kick this member.", delete_after=5)
-            return
-        
+            return await ctx.send("❌ You don't have permission to kick this member.", delete_after=5)
         if not has_higher_role(ctx.guild.me, member):
-            await ctx.send("❌ I cannot kick this member due to role hierarchy.", delete_after=5)
-            return
-        
-        # DM best-effort
+            return await ctx.send("❌ I cannot kick this member due to role hierarchy.", delete_after=5)
+
         try:
-            dm_embed = discord.Embed(
+            dm = discord.Embed(
                 title=f"You were kicked from {ctx.guild.name}",
                 description=f"***Reason:*** {reason}",
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if ctx.guild.icon:
-                dm_embed.set_thumbnail(url=ctx.guild.icon.url)
-            await member.send(embed=dm_embed)
+                dm.set_thumbnail(url=ctx.guild.icon.url)
+            await member.send(embed=dm)
         except Exception:
             pass
 
         try:
             await member.kick(reason=f"Kicked by staff: {reason}")
-            embed = self._dyno_style_embed("kicked", member, reason)
-            embed.set_footer(text=f"User ID: {member.id}")
-            await ctx.send(embed=embed)
+            e = self._dyno_style_embed("kicked", member, reason)
+            e.set_footer(text=f"User ID: {member.id}")
+            await ctx.send(embed=e)
         except discord.Forbidden:
             await ctx.send("❌ I don't have permission to kick this member.", delete_after=5)
 
     @commands.command(name="ban")
     async def prefix_ban(self, ctx, member: discord.Member, *, reason="No reason provided"):
-        """Prefix version of ban: DM first, hide moderator in public embed."""
         await self.delete_command_message(ctx)
-        
         if not isinstance(ctx.author, discord.Member) or not ctx.guild:
             return
-            
         if not has_moderation_permissions(ctx.author, member):
-            await ctx.send("❌ You don't have permission to ban this member.", delete_after=5)
-            return
-        
+            return await ctx.send("❌ You don't have permission to ban this member.", delete_after=5)
         if not has_higher_role(ctx.guild.me, member):
-            await ctx.send("❌ I cannot ban this member due to role hierarchy.", delete_after=5)
-            return
+            return await ctx.send("❌ I cannot ban this member due to role hierarchy.", delete_after=5)
 
         try:
-            dm_embed = discord.Embed(
+            dm = discord.Embed(
                 title=f"You were banned from {ctx.guild.name}",
                 description=f"***Reason:*** {reason}",
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if ctx.guild.icon:
-                dm_embed.set_thumbnail(url=ctx.guild.icon.url)
-            await member.send(embed=dm_embed)
+                dm.set_thumbnail(url=ctx.guild.icon.url)
+            await member.send(embed=dm)
         except Exception:
             pass
 
         try:
             await member.ban(reason=f"Banned by staff: {reason}")
-            embed = self._dyno_style_embed("banned", member, reason)
-            embed.set_footer(text=f"User ID: {member.id}")
-            await ctx.send(embed=embed)
+            e = self._dyno_style_embed("banned", member, reason)
+            e.set_footer(text=f"User ID: {member.id}")
+            await ctx.send(embed=e)
         except discord.Forbidden:
             await ctx.send("❌ I don't have permission to ban this member.", delete_after=5)
 
     @commands.command(name="timeout")
     async def prefix_timeout(self, ctx, member: discord.Member, minutes: int, *, reason="No reason provided"):
-        """Prefix version of timeout: DM first, hide moderator in public embed."""
         await self.delete_command_message(ctx)
-
         if minutes <= 0 or minutes > 40320:
-            await ctx.send("❌ Duration must be between 1 and 40320 minutes (28 days).", delete_after=5)
-            return
-
+            return await ctx.send("❌ Duration must be between 1 and 40320 minutes (28 days).", delete_after=5)
         if not isinstance(ctx.author, discord.Member) or not ctx.guild:
             return
-
         if not has_moderation_permissions(ctx.author, member):
-            await ctx.send("❌ You don't have permission to timeout this member.", delete_after=5)
-            return
-
+            return await ctx.send("❌ You don't have permission to timeout this member.", delete_after=5)
         if not has_higher_role(ctx.guild.me, member):
-            await ctx.send("❌ I cannot timeout this member due to role hierarchy.", delete_after=5)
-            return
+            return await ctx.send("❌ I cannot timeout this member due to role hierarchy.", delete_after=5)
 
         until = discord.utils.utcnow() + timedelta(minutes=minutes)
 
         try:
-            dm_embed = discord.Embed(
+            dm = discord.Embed(
                 title=f"You were timed out in {ctx.guild.name}",
                 description=(
                     f"***Duration:*** {minutes} minutes\n"
-                    f"***Until:*** <t:{int(until.timestamp())}:F>\n"
+                    f"***Until:*** {discord.utils.format_dt(until, style='F')}\n"
                     f"***Reason:*** {reason}"
                 ),
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if ctx.guild.icon:
-                dm_embed.set_thumbnail(url=ctx.guild.icon.url)
-            await member.send(embed=dm_embed)
+                dm.set_thumbnail(url=ctx.guild.icon.url)
+            await member.send(embed=dm)
         except Exception:
             pass
 
         try:
             await member.timeout(until, reason=f"Timed out by staff: {reason}")
-            until_str = self._pretty_dt(until)
             e = self._dyno_style_embed("timed out", member, reason)
-            e.set_footer(text=f"User ID: {member.id} • Until: {until_str} • Duration: {minutes}m")
+            e.description += f"\n***Until:*** {discord.utils.format_dt(until, style='F')} • ***Duration:*** {minutes}m"
+            e.set_footer(text=f"User ID: {member.id}")
             await ctx.send(embed=e)
         except discord.Forbidden:
             await ctx.send("❌ I don't have permission to timeout this member.", delete_after=5)
 
     @commands.command(name="untimeout")
     async def prefix_untimeout(self, ctx, member: discord.Member, *, reason="No reason provided"):
-        """Prefix version of untimeout: DM best-effort, hide moderator."""
         await self.delete_command_message(ctx)
-
         if not isinstance(ctx.author, discord.Member) or not ctx.guild:
             return
-
         if not has_moderation_permissions(ctx.author, member):
-            await ctx.send("❌ You don't have permission to remove timeout from this member.", delete_after=5)
-            return
+            return await ctx.send("❌ You don't have permission to remove timeout from this member.", delete_after=5)
 
         try:
-            dm_embed = discord.Embed(
+            dm = discord.Embed(
                 title=f"Your timeout was removed in {ctx.guild.name}",
                 description=f"***Reason:*** {reason}",
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if ctx.guild.icon:
-                dm_embed.set_thumbnail(url=ctx.guild.icon.url)
-            await member.send(embed=dm_embed)
+                dm.set_thumbnail(url=ctx.guild.icon.url)
+            await member.send(embed=dm)
         except Exception:
             pass
 
@@ -494,40 +368,27 @@ class ModerationCog(commands.Cog):
 
     @commands.command(name="unban")
     async def prefix_unban(self, ctx, user_id: int, *, reason: str = "No reason provided"):
-        """Prefix version of unban: auto-delete command message and unban by user ID."""
         await self.delete_command_message(ctx)
-
         if not ctx.guild or not isinstance(ctx.author, discord.Member):
             return
-
         if not ctx.author.guild_permissions.ban_members:
-            await ctx.send("❌ You don't have permission to unban members.", delete_after=5)
-            return
+            return await ctx.send("❌ You don't have permission to unban members.", delete_after=5)
 
         try:
             user = await self.bot.fetch_user(user_id)
-
-            # Ensure they are actually banned
             try:
                 await ctx.guild.fetch_ban(user)
             except discord.NotFound:
-                await ctx.send("❌ That user is not banned from this server.", delete_after=5)
-                return
+                return await ctx.send("❌ That user is not banned from this server.", delete_after=5)
 
-            # Unban
             await ctx.guild.unban(user, reason=f"Unbanned by staff: {reason}")
-
-            # Public confirmation (Dyno style)
-            embed = self._dyno_style_embed("unbanned", user, reason)
-            embed.set_footer(text=f"User ID: {user.id}")
-            await ctx.send(embed=embed)
-
+            e = self._dyno_style_embed("unbanned", user, reason)
+            e.set_footer(text=f"User ID: {user.id}")
+            await ctx.send(embed=e)
         except discord.NotFound:
             await ctx.send("❌ User not found.", delete_after=5)
-        except discord.HTTPException as e:
-            await ctx.send(f"❌ Failed to unban user: {e}", delete_after=5)
-        except Exception:
-            await ctx.send("❌ Something went wrong while trying to unban.", delete_after=5)
+        except discord.HTTPException as err:
+            await ctx.send(f"❌ Failed to unban user: {err}", delete_after=5)
 
 
 async def setup(bot):
