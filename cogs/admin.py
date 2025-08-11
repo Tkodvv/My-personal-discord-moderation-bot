@@ -206,7 +206,9 @@ class AdminCog(commands.Cog):
         self.logger.info(f"Say command used by {interaction.user} in {interaction.guild.name}")
 
         try:
-            await target.send(content=content, files=files or None)
+            # allow role/user mentions in the content (so <@&id> turns into a real ping)
+            allowed = discord.AllowedMentions(everyone=False, users=True, roles=True)
+            await target.send(content=content, files=files or None, allowed_mentions=allowed)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to send messages in that channel.", ephemeral=True)
             return
