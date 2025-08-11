@@ -19,6 +19,12 @@ class ModerationCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.logger = logging.getLogger(__name__)
+        # simple in-memory case counter (resets on restart)
+        self._case_counter = 0
+
+    def _next_case(self) -> int:
+        self._case_counter += 1
+        return self._case_counter
     
     async def delete_command_message(self, ctx):
         """Helper to delete the command message."""
@@ -26,6 +32,38 @@ class ModerationCog(commands.Cog):
             await ctx.message.delete()
         except (discord.NotFound, discord.Forbidden):
             pass
+
+    # ---------- tiny helper to build Dyno-style public embeds ----------
+    def _dyno_style_embed(self, verb_past: str, target: discord.abc.User, reason: str, footer_note: Optional[str] = None) -> discord.Embed:
+        """
+        Build a compact, Dyno-like embed:
+        - color: green (your main color)
+        - author: 'Moderation' with target's avatar
+        - description: "<name> was <verb>.  ***Reason:*** <reason>"
+        - footer: Case #n · User ID · timestamp (+ optional note)
+        """
+        case_no = self._next_case()
+        desc_lines = [
+            f"**{getattr(target, 'display_name', getattr(target, 'name', 'User'))}** was {verb_past}.",
+            f"***Reason:*** {reason}"
+        ]
+        embed = discord.Embed(
+            description="\n".join(desc_lines),
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow()
+        )
+        # Author icon = target avatar, text = 'Moderation'
+        try:
+            icon = target.display_avatar.url  # works for Member/User
+        except Exception:
+            icon = None
+        embed.set_author(name="Moderation", icon_url=icon if icon else discord.Embed.Empty)
+
+        footer_bits = [f"Case #{case_no}", f"User ID: {getattr(target, 'id', 'N/A')}"]
+        if footer_note:
+            footer_bits.append(footer_note)
+        embed.set_footer(text=" • ".join(footer_bits))
+        return embed
 
     # --------------------
     # KICK (DM + hide mod)
@@ -58,8 +96,8 @@ class ModerationCog(commands.Cog):
         try:
             dm_embed = discord.Embed(
                 title=f"You were kicked from {interaction.guild.name}",
-                description=f"**Reason:** {reason}",
-                color=discord.Color.orange(),
+                description=f"***Reason:*** {reason}",
+                color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if interaction.guild.icon:
@@ -69,22 +107,11 @@ class ModerationCog(commands.Cog):
             pass
         
         try:
-            # Log the action
-            self.logger.info(f"Kick command used by {interaction.user} on {member} in {interaction.guild.name if interaction.guild else 'Unknown Guild'}")
-            
             # Perform the kick
             await member.kick(reason=f"Kicked by staff: {reason}")
-            
-            # Public confirmation (Dyno-like small; green brand)
-            embed = discord.Embed(
-                description=f"**{member.display_name}** was kicked.\n\n***Reason:*** {reason}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=False)
-            embed.set_thumbnail(url=member.display_avatar.url)
+            # Public confirmation (Dyno style)
+            embed = self._dyno_style_embed("kicked", member, reason)
             await interaction.response.send_message(embed=embed)
-            
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to kick this member.", ephemeral=True)
         except discord.HTTPException as e:
@@ -134,8 +161,8 @@ class ModerationCog(commands.Cog):
         try:
             dm_embed = discord.Embed(
                 title=f"You were banned from {interaction.guild.name}",
-                description=f"**Reason:** {reason}",
-                color=discord.Color.red(),
+                description=f"***Reason:*** {reason}",
+                color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if interaction.guild.icon:
@@ -145,28 +172,15 @@ class ModerationCog(commands.Cog):
             pass
         
         try:
-            # Log the action
-            self.logger.info(f"Ban command: {interaction.user} -> {member} in {interaction.guild.name} | delete_days={delete_messages} | reason={reason}")
-            
             # Perform the ban
             await member.ban(
                 reason=f"Banned by staff: {reason}",
                 delete_message_days=delete_messages or 0
             )
-            
-            # Public confirmation (Dyno-like; green)
-            embed = discord.Embed(
-                description=f"**{member.display_name}** was banned.\n\n***Reason:*** {reason}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=False)
-            if delete_messages and delete_messages > 0:
-                embed.add_field(name="Messages Deleted", value=f"{delete_messages} days", inline=True)
-            embed.set_thumbnail(url=member.display_avatar.url)
-            
+            # Public confirmation (Dyno style)
+            note = f"Messages Deleted: {delete_messages} day(s)" if delete_messages else None
+            embed = self._dyno_style_embed("banned", member, reason, footer_note=note)
             await interaction.response.send_message(embed=embed)  # public
-            
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to ban this member.", ephemeral=True)
         except discord.HTTPException as e:
@@ -210,8 +224,8 @@ class ModerationCog(commands.Cog):
         try:
             dm_embed = discord.Embed(
                 title=f"You were timed out in {interaction.guild.name}",
-                description=f"**Duration:** {duration} minutes\n**Until:** <t:{int(timeout_until.timestamp())}:F>\n**Reason:** {reason}",
-                color=discord.Color.yellow(),
+                description=f"***Duration:*** {duration} minutes\n***Until:*** <t:{int(timeout_until.timestamp())}:F>\n***Reason:*** {reason}",
+                color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if interaction.guild.icon:
@@ -221,24 +235,12 @@ class ModerationCog(commands.Cog):
             pass
         
         try:
-            self.logger.info(f"Timeout command used by {interaction.user} on {member} for {duration} minutes in {interaction.guild.name}")
-            
             # Perform the timeout
             await member.timeout(timeout_until, reason=f"Timed out by staff: {reason}")
-
-            # Public confirmation (Dyno-like; green)
-            embed = discord.Embed(
-                description=f"**{member.display_name}** was timed out.\n\n***Reason:*** {reason}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=False)
-            embed.add_field(name="Duration", value=f"{duration} minutes", inline=True)
-            embed.add_field(name="Until", value=f"<t:{int(timeout_until.timestamp())}:f>", inline=True)
-            embed.set_thumbnail(url=member.display_avatar.url)
-            
+            # Public confirmation (Dyno style)
+            note = f"Until: {discord.utils.format_dt(timeout_until, style='f')} · Duration: {duration}m"
+            embed = self._dyno_style_embed("timed out", member, reason, footer_note=note)
             await interaction.response.send_message(embed=embed)
-            
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to timeout this member.", ephemeral=True)
         except discord.HTTPException as e:
@@ -271,7 +273,7 @@ class ModerationCog(commands.Cog):
         try:
             dm_embed = discord.Embed(
                 title=f"Your timeout was removed in {interaction.guild.name}",
-                description=f"**Reason:** {reason}",
+                description=f"***Reason:*** {reason}",
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
@@ -282,22 +284,11 @@ class ModerationCog(commands.Cog):
             pass
 
         try:
-            self.logger.info(f"Untimeout command used by {interaction.user} on {member} in {interaction.guild.name}")
-            
             # Remove the timeout
             await member.timeout(None, reason=f"Timeout removed by staff: {reason}")
-
-            # Public confirmation (Dyno-like; green)
-            embed = discord.Embed(
-                description=f"**{member.display_name}**'s timeout was removed.\n\n***Reason:*** {reason}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=False)
-            embed.set_thumbnail(url=member.display_avatar.url)
-            
+            # Public confirmation (Dyno style)
+            embed = self._dyno_style_embed("had their timeout removed", member, reason)
             await interaction.response.send_message(embed=embed)
-            
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to remove timeout from this member.", ephemeral=True)
         except discord.HTTPException as e:
@@ -331,21 +322,11 @@ class ModerationCog(commands.Cog):
                 await interaction.response.send_message("❌ This user is not banned from this server.", ephemeral=True)
                 return
             
-            self.logger.info(f"Unban command used by {interaction.user} for user {user_id} in {interaction.guild.name}")
-            
-            # Unban first
+            # Do the unban
             await interaction.guild.unban(user, reason=f"Unbanned by staff: {reason}")
 
-            # Public confirmation (Dyno-like; green)
-            embed = discord.Embed(
-                description=f"**{user.display_name}** was unbanned.\n\n***Reason:*** {reason}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            embed.add_field(name="User", value=f"{user.mention} ({user.id})", inline=False)
-            if user.display_avatar:
-                embed.set_thumbnail(url=user.display_avatar.url)
-            
+            # Public confirmation (Dyno style)
+            embed = self._dyno_style_embed("unbanned", user, reason)
             await interaction.response.send_message(embed=embed)
             
         except ValueError:
@@ -378,10 +359,11 @@ class ModerationCog(commands.Cog):
             return
         
         try:
+            # DM best-effort
             dm_embed = discord.Embed(
                 title=f"You were kicked from {ctx.guild.name}",
-                description=f"**Reason:** {reason}",
-                color=discord.Color.orange(),
+                description=f"***Reason:*** {reason}",
+                color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if ctx.guild.icon:
@@ -392,13 +374,7 @@ class ModerationCog(commands.Cog):
 
         try:
             await member.kick(reason=f"Kicked by staff: {reason}")
-            embed = discord.Embed(
-                description=f"**{member.display_name}** was kicked.\n\n***Reason:*** {reason}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=False)
-            embed.set_thumbnail(url=member.display_avatar.url)
+            embed = self._dyno_style_embed("kicked", member, reason)
             await ctx.send(embed=embed)
         except discord.Forbidden:
             await ctx.send("❌ I don't have permission to kick this member.", delete_after=5)
@@ -422,8 +398,8 @@ class ModerationCog(commands.Cog):
         try:
             dm_embed = discord.Embed(
                 title=f"You were banned from {ctx.guild.name}",
-                description=f"**Reason:** {reason}",
-                color=discord.Color.red(),
+                description=f"***Reason:*** {reason}",
+                color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if ctx.guild.icon:
@@ -434,13 +410,7 @@ class ModerationCog(commands.Cog):
 
         try:
             await member.ban(reason=f"Banned by staff: {reason}")
-            embed = discord.Embed(
-                description=f"**{member.display_name}** was banned.\n\n***Reason:*** {reason}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=False)
-            embed.set_thumbnail(url=member.display_avatar.url)
+            embed = self._dyno_style_embed("banned", member, reason)
             await ctx.send(embed=embed)
         except discord.Forbidden:
             await ctx.send("❌ I don't have permission to ban this member.", delete_after=5)
@@ -470,8 +440,8 @@ class ModerationCog(commands.Cog):
         try:
             dm_embed = discord.Embed(
                 title=f"You were timed out in {ctx.guild.name}",
-                description=f"**Duration:** {minutes} minutes\n**Until:** <t:{int(until.timestamp())}:F>\n**Reason:** {reason}",
-                color=discord.Color.yellow(),
+                description=f"***Duration:*** {minutes} minutes\n***Until:*** <t:{int(until.timestamp())}:F>\n***Reason:*** {reason}",
+                color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             if ctx.guild.icon:
@@ -482,15 +452,8 @@ class ModerationCog(commands.Cog):
 
         try:
             await member.timeout(until, reason=f"Timed out by staff: {reason}")
-            e = discord.Embed(
-                description=f"**{member.display_name}** was timed out.\n\n***Reason:*** {reason}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            e.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=False)
-            e.add_field(name="Duration", value=f"{minutes} minutes", inline=True)
-            e.add_field(name="Until", value=f"<t:{int(until.timestamp())}:f>", inline=True)
-            e.set_thumbnail(url=member.display_avatar.url)
+            note = f"Until: {discord.utils.format_dt(until, style='f')} · Duration: {minutes}m"
+            e = self._dyno_style_embed("timed out", member, reason, footer_note=note)
             await ctx.send(embed=e)
         except discord.Forbidden:
             await ctx.send("❌ I don't have permission to timeout this member.", delete_after=5)
@@ -510,7 +473,7 @@ class ModerationCog(commands.Cog):
         try:
             dm_embed = discord.Embed(
                 title=f"Your timeout was removed in {ctx.guild.name}",
-                description=f"**Reason:** {reason}",
+                description=f"***Reason:*** {reason}",
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
@@ -522,13 +485,7 @@ class ModerationCog(commands.Cog):
 
         try:
             await member.timeout(None, reason=f"Timeout removed by staff: {reason}")
-            e = discord.Embed(
-                description=f"**{member.display_name}**'s timeout was removed.\n\n***Reason:*** {reason}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            e.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=False)
-            e.set_thumbnail(url=member.display_avatar.url)
+            e = self._dyno_style_embed("had their timeout removed", member, reason)
             await ctx.send(embed=e)
         except discord.Forbidden:
             await ctx.send("❌ I don't have permission to remove timeout from this member.", delete_after=5)
@@ -558,16 +515,8 @@ class ModerationCog(commands.Cog):
             # Unban
             await ctx.guild.unban(user, reason=f"Unbanned by staff: {reason}")
 
-            # Public confirmation (Dyno-like; green)
-            embed = discord.Embed(
-                description=f"**{user.display_name}** was unbanned.\n\n***Reason:*** {reason}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            embed.add_field(name="User", value=f"{user.mention} ({user.id})", inline=False)
-            if user.display_avatar:
-                embed.set_thumbnail(url=user.display_avatar.url)
-
+            # Public confirmation (Dyno style)
+            embed = self._dyno_style_embed("unbanned", user, reason)
             await ctx.send(embed=embed)
 
         except discord.NotFound:
