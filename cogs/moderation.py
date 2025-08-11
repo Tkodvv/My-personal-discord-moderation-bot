@@ -5,6 +5,7 @@ Contains all moderation-related slash commands like kick, ban, timeout, etc.
 """
 
 import logging
+import re
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -41,6 +42,18 @@ class ModerationCog(commands.Cog):
             description=f"**{display}** was {verb_past}.\n***Reason:*** {reason}",
             color=discord.Color.green(),
             timestamp=discord.utils.utcnow()
+        )
+
+    # ---------- regex helpers ----------
+    def _invite_regex(self):
+        # discord.gg/xxxx, discord.com/invite/xxxx, discordapp.com/invite/xxxx
+        return re.compile(r"(?:discord\.gg|discord(?:app)?\.com/invite)/[A-Za-z0-9-]+", re.IGNORECASE)
+
+    def _url_regex(self):
+        # simple URL matcher (http/https + domain)
+        return re.compile(
+            r"https?://[^\s/$.?#].[^\s]*",
+            re.IGNORECASE
         )
 
     # ==============================
@@ -163,7 +176,6 @@ class ModerationCog(commands.Cog):
         try:
             await member.timeout(until, reason=f"Timed out by staff: {reason}")
             e = self._dyno_style_embed("timed out", member, reason)
-            # Put Until + Duration in the description for localization
             e.description += f"\n***Until:*** {discord.utils.format_dt(until, style='F')} • ***Duration:*** {duration}m"
             e.set_footer(text=f"User ID: {member.id}")
             await interaction.response.send_message(embed=e)
@@ -230,6 +242,178 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ User not found.", ephemeral=True)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to unban users.", ephemeral=True)
+
+    # ------------------------------
+    # Purge variants (slash)
+    # ------------------------------
+    @app_commands.command(name="purge", description="Delete recent messages (optionally from one user).")
+    @app_commands.describe(amount="How many messages to scan (1–100)", user="Only delete messages from this user (optional)")
+    async def purge(self, interaction: discord.Interaction, amount: int, user: Optional[discord.Member] = None):
+        if not isinstance(interaction.user, discord.Member) or not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        if not interaction.user.guild_permissions.manage_messages:
+            return await interaction.response.send_message("❌ You need **Manage Messages**.", ephemeral=True)
+        if amount < 1 or amount > 100:
+            return await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if user:
+                def check(m: discord.Message):
+                    return m.author == user
+                deleted = await interaction.channel.purge(limit=amount * 2, check=check)
+                await interaction.followup.send(f"🧹 Deleted **{len(deleted)}** messages from {user.mention}.", ephemeral=True)
+            else:
+                deleted = await interaction.channel.purge(limit=amount)
+                await interaction.followup.send(f"🧹 Deleted **{len(deleted)}** messages.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to delete messages.", ephemeral=True)
+
+    @app_commands.command(name="purge_attachments", description="Delete recent messages that contain attachments.")
+    @app_commands.describe(amount="How many messages to scan (1–100)")
+    async def purge_attachments(self, interaction: discord.Interaction, amount: int):
+        if not isinstance(interaction.user, discord.Member) or not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        if not interaction.user.guild_permissions.manage_messages:
+            return await interaction.response.send_message("❌ You need **Manage Messages**.", ephemeral=True)
+        if amount < 1 or amount > 100:
+            return await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            def check(m: discord.Message):
+                return bool(m.attachments)
+            deleted = await interaction.channel.purge(limit=amount * 3, check=check)
+            await interaction.followup.send(f"🧹 Deleted **{len(deleted)}** messages with attachments.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to delete messages.", ephemeral=True)
+
+    @app_commands.command(name="purge_invites", description="Delete recent messages that contain Discord invite links.")
+    @app_commands.describe(amount="How many messages to scan (1–100)")
+    async def purge_invites(self, interaction: discord.Interaction, amount: int):
+        if not isinstance(interaction.user, discord.Member) or not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        if not interaction.user.guild_permissions.manage_messages:
+            return await interaction.response.send_message("❌ You need **Manage Messages**.", ephemeral=True)
+        if amount < 1 or amount > 100:
+            return await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
+
+        regex = self._invite_regex()
+        await interaction.response.defer(ephemeral=True)
+        try:
+            def check(m: discord.Message):
+                return bool(m.content and regex.search(m.content))
+            deleted = await interaction.channel.purge(limit=amount * 3, check=check)
+            await interaction.followup.send(f"🧹 Deleted **{len(deleted)}** messages containing invites.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to delete messages.", ephemeral=True)
+
+    @app_commands.command(name="purge_links", description="Delete recent messages that contain any URL.")
+    @app_commands.describe(amount="How many messages to scan (1–100)")
+    async def purge_links(self, interaction: discord.Interaction, amount: int):
+        if not isinstance(interaction.user, discord.Member) or not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        if not interaction.user.guild_permissions.manage_messages:
+            return await interaction.response.send_message("❌ You need **Manage Messages**.", ephemeral=True)
+        if amount < 1 or amount > 100:
+            return await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
+
+        url_rx = self._url_regex()
+        await interaction.response.defer(ephemeral=True)
+        try:
+            def check(m: discord.Message):
+                return bool(m.content and url_rx.search(m.content))
+            deleted = await interaction.channel.purge(limit=amount * 3, check=check)
+            await interaction.followup.send(f"🧹 Deleted **{len(deleted)}** messages with links.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to delete messages.", ephemeral=True)
+
+    @app_commands.command(name="purge_bots", description="Delete recent messages sent by bots.")
+    @app_commands.describe(amount="How many messages to scan (1–100)")
+    async def purge_bots(self, interaction: discord.Interaction, amount: int):
+        if not isinstance(interaction.user, discord.Member) or not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        if not interaction.user.guild_permissions.manage_messages:
+            return await interaction.response.send_message("❌ You need **Manage Messages**.", ephemeral=True)
+        if amount < 1 or amount > 100:
+            return await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            def check(m: discord.Message):
+                return bool(m.author.bot)
+            deleted = await interaction.channel.purge(limit=amount * 2, check=check)
+            await interaction.followup.send(f"🧹 Deleted **{len(deleted)}** bot messages.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to delete messages.", ephemeral=True)
+
+    @app_commands.command(name="purge_text", description="Delete recent messages that contain a specific text (case-insensitive).")
+    @app_commands.describe(amount="How many messages to scan (1–100)", query="Substring to match (case-insensitive)")
+    async def purge_text(self, interaction: discord.Interaction, amount: int, query: str):
+        if not isinstance(interaction.user, discord.Member) or not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        if not interaction.user.guild_permissions.manage_messages:
+            return await interaction.response.send_message("❌ You need **Manage Messages**.", ephemeral=True)
+        if amount < 1 or amount > 100:
+            return await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
+        if not query.strip():
+            return await interaction.response.send_message("❌ Query cannot be empty.", ephemeral=True)
+
+        needle = query.lower()
+        await interaction.response.defer(ephemeral=True)
+        try:
+            def check(m: discord.Message):
+                return bool(m.content and needle in m.content.lower())
+            deleted = await interaction.channel.purge(limit=amount * 3, check=check)
+            await interaction.followup.send(f"🧹 Deleted **{len(deleted)}** messages containing `{query}`.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to delete messages.", ephemeral=True)
+
+    @app_commands.command(name="purge_before", description="Delete messages sent before a specific message.")
+    @app_commands.describe(amount="How many messages to scan (1–100)", message_id="Message ID to use as the 'before' anchor")
+    async def purge_before(self, interaction: discord.Interaction, amount: int, message_id: str):
+        if not isinstance(interaction.user, discord.Member) or not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        if not interaction.user.guild_permissions.manage_messages:
+            return await interaction.response.send_message("❌ You need **Manage Messages**.", ephemeral=True)
+        if amount < 1 or amount > 100:
+            return await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            mid = int(message_id)
+            anchor = await interaction.channel.fetch_message(mid)
+        except Exception:
+            return await interaction.followup.send("❌ Couldn't find that message ID in this channel.", ephemeral=True)
+
+        try:
+            deleted = await interaction.channel.purge(limit=amount, before=anchor)
+            await interaction.followup.send(f"🧹 Deleted **{len(deleted)}** messages before [this message]({anchor.jump_url}).", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to delete messages.", ephemeral=True)
+
+    @app_commands.command(name="purge_after", description="Delete messages sent after a specific message.")
+    @app_commands.describe(amount="How many messages to scan (1–100)", message_id="Message ID to use as the 'after' anchor")
+    async def purge_after(self, interaction: discord.Interaction, amount: int, message_id: str):
+        if not isinstance(interaction.user, discord.Member) or not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        if not interaction.user.guild_permissions.manage_messages:
+            return await interaction.response.send_message("❌ You need **Manage Messages**.", ephemeral=True)
+        if amount < 1 or amount > 100:
+            return await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            mid = int(message_id)
+            anchor = await interaction.channel.fetch_message(mid)
+        except Exception:
+            return await interaction.followup.send("❌ Couldn't find that message ID in this channel.", ephemeral=True)
+
+        try:
+            deleted = await interaction.channel.purge(limit=amount, after=anchor)
+            await interaction.followup.send(f"🧹 Deleted **{len(deleted)}** messages after [this message]({anchor.jump_url}).", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to delete messages.", ephemeral=True)
 
     # ==============================
     # Prefix commands (message)
@@ -389,6 +573,134 @@ class ModerationCog(commands.Cog):
             await ctx.send("❌ User not found.", delete_after=5)
         except discord.HTTPException as err:
             await ctx.send(f"❌ Failed to unban user: {err}", delete_after=5)
+
+    # ------------------------------
+    # Purge variants (prefix)
+    # ------------------------------
+    @commands.command(name="purge")
+    @commands.has_permissions(manage_messages=True)
+    async def p_purge(self, ctx, amount: int, member: Optional[discord.Member] = None):
+        await self.delete_command_message(ctx)
+        if amount < 1 or amount > 100:
+            return await ctx.send("❌ Amount must be between 1 and 100.", delete_after=5)
+        try:
+            if member:
+                def check(m: discord.Message):
+                    return m.author == member
+                deleted = await ctx.channel.purge(limit=amount * 2, check=check)
+                await ctx.send(f"🧹 Deleted **{len(deleted)}** messages from {member.mention}", delete_after=5)
+            else:
+                deleted = await ctx.channel.purge(limit=amount)
+                await ctx.send(f"🧹 Deleted **{len(deleted)}** messages", delete_after=5)
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
+
+    @commands.command(name="purgeattachments")
+    @commands.has_permissions(manage_messages=True)
+    async def p_purge_attachments(self, ctx, amount: int):
+        await self.delete_command_message(ctx)
+        if amount < 1 or amount > 100:
+            return await ctx.send("❌ Amount must be between 1 and 100.", delete_after=5)
+        try:
+            def check(m: discord.Message):
+                return bool(m.attachments)
+            deleted = await ctx.channel.purge(limit=amount * 3, check=check)
+            await ctx.send(f"🧹 Deleted **{len(deleted)}** messages with attachments", delete_after=5)
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
+
+    @commands.command(name="purgeinvites")
+    @commands.has_permissions(manage_messages=True)
+    async def p_purge_invites(self, ctx, amount: int):
+        await self.delete_command_message(ctx)
+        if amount < 1 or amount > 100:
+            return await ctx.send("❌ Amount must be between 1 and 100.", delete_after=5)
+        regex = self._invite_regex()
+        try:
+            def check(m: discord.Message):
+                return bool(m.content and regex.search(m.content))
+            deleted = await ctx.channel.purge(limit=amount * 3, check=check)
+            await ctx.send(f"🧹 Deleted **{len(deleted)}** messages containing invites", delete_after=5)
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
+
+    @commands.command(name="purgelinks")
+    @commands.has_permissions(manage_messages=True)
+    async def p_purge_links(self, ctx, amount: int):
+        await self.delete_command_message(ctx)
+        if amount < 1 or amount > 100:
+            return await ctx.send("❌ Amount must be between 1 and 100.", delete_after=5)
+        url_rx = self._url_regex()
+        try:
+            def check(m: discord.Message):
+                return bool(m.content and url_rx.search(m.content))
+            deleted = await ctx.channel.purge(limit=amount * 3, check=check)
+            await ctx.send(f"🧹 Deleted **{len(deleted)}** messages with links", delete_after=5)
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
+
+    @commands.command(name="purgebots")
+    @commands.has_permissions(manage_messages=True)
+    async def p_purge_bots(self, ctx, amount: int):
+        await self.delete_command_message(ctx)
+        if amount < 1 or amount > 100:
+            return await ctx.send("❌ Amount must be between 1 and 100.", delete_after=5)
+        try:
+            def check(m: discord.Message):
+                return bool(m.author.bot)
+            deleted = await ctx.channel.purge(limit=amount * 2, check=check)
+            await ctx.send(f"🧹 Deleted **{len(deleted)}** bot messages", delete_after=5)
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
+
+    @commands.command(name="purgetext")
+    @commands.has_permissions(manage_messages=True)
+    async def p_purge_text(self, ctx, amount: int, *, query: str):
+        await self.delete_command_message(ctx)
+        if amount < 1 or amount > 100:
+            return await ctx.send("❌ Amount must be between 1 and 100.", delete_after=5)
+        if not query.strip():
+            return await ctx.send("❌ Query cannot be empty.", delete_after=5)
+        needle = query.lower()
+        try:
+            def check(m: discord.Message):
+                return bool(m.content and needle in m.content.lower())
+            deleted = await ctx.channel.purge(limit=amount * 3, check=check)
+            await ctx.send(f"🧹 Deleted **{len(deleted)}** messages containing `{query}`", delete_after=5)
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
+
+    @commands.command(name="purgebefore")
+    @commands.has_permissions(manage_messages=True)
+    async def p_purge_before(self, ctx, amount: int, message_id: int):
+        await self.delete_command_message(ctx)
+        if amount < 1 or amount > 100:
+            return await ctx.send("❌ Amount must be between 1 and 100.", delete_after=5)
+        try:
+            anchor = await ctx.channel.fetch_message(int(message_id))
+        except Exception:
+            return await ctx.send("❌ Couldn't find that message ID in this channel.", delete_after=5)
+        try:
+            deleted = await ctx.channel.purge(limit=amount, before=anchor)
+            await ctx.send(f"🧹 Deleted **{len(deleted)}** messages before that message", delete_after=5)
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
+
+    @commands.command(name="purgeafter")
+    @commands.has_permissions(manage_messages=True)
+    async def p_purge_after(self, ctx, amount: int, message_id: int):
+        await self.delete_command_message(ctx)
+        if amount < 1 or amount > 100:
+            return await ctx.send("❌ Amount must be between 1 and 100.", delete_after=5)
+        try:
+            anchor = await ctx.channel.fetch_message(int(message_id))
+        except Exception:
+            return await ctx.send("❌ Couldn't find that message ID in this channel.", delete_after=5)
+        try:
+            deleted = await ctx.channel.purge(limit=amount, after=anchor)
+            await ctx.send(f"🧹 Deleted **{len(deleted)}** messages after that message", delete_after=5)
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
 
 
 async def setup(bot):
