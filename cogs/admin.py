@@ -6,7 +6,6 @@ and per‑guild bot-mod role management (persistent).
 
 import logging
 import io
-import re
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -49,35 +48,6 @@ class AdminCog(commands.Cog):
             'created_at': message.created_at,
             'deleted_at': datetime.utcnow()
         }
-
-    # ---------- mention helpers ----------
-    def _allowed_mentions_for_roles(self, guild: discord.Guild, text: Optional[str]) -> discord.AllowedMentions:
-        """
-        Parse <@&ROLE_ID> patterns in text and allow pinging only those roles.
-        If none are found, still allow role mentions generally.
-        """
-        if not text:
-            return discord.AllowedMentions(everyone=False, users=True, roles=True)
-        role_ids = {int(m) for m in re.findall(r"<@&(\d{6,25})>", text)}
-        roles = [guild.get_role(rid) for rid in role_ids if guild.get_role(rid)]
-        if roles:
-            return discord.AllowedMentions(everyone=False, users=True, roles=roles)
-        return discord.AllowedMentions(everyone=False, users=True, roles=True)
-
-    def _render_role_mentions(self, guild: discord.Guild, text: Optional[str]) -> tuple[Optional[str], discord.AllowedMentions]:
-        """
-        Replace any <@&id> that refer to deleted/missing roles with plain text (just in case),
-        and return content + an AllowedMentions that permits only the roles present.
-        """
-        if not text:
-            return None, discord.AllowedMentions(everyone=False, users=True, roles=True)
-        # This keeps valid <@&id> as-is, but if a role doesn't exist we swap it for '#deleted-role'
-        def _swap(m):
-            rid = int(m.group(1))
-            r = guild.get_role(rid)
-            return r.mention if r else "#deleted-role"
-        new_text = re.sub(r"<@&(\d{6,25})>", _swap, text)
-        return new_text, self._allowed_mentions_for_roles(guild, new_text)
 
     # =========================================================
     # Bot modlist management (per‑guild, persistent) – SLASH
@@ -211,6 +181,7 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
 
+        # If you want /say to respect the persistent mod list instead, replace this block
         has_role = any((role.id in self.allowed_say_roles) for role in interaction.user.roles)
         if not has_role:
             await interaction.response.send_message("❌ You don't have access to `/say`.", ephemeral=True)
@@ -235,8 +206,7 @@ class AdminCog(commands.Cog):
         self.logger.info(f"Say command used by {interaction.user} in {interaction.guild.name}")
 
         try:
-            text, allowed = self._render_role_mentions(interaction.guild, content)
-            await target.send(content=text, files=files or None, allowed_mentions=allowed)
+            await target.send(content=content, files=files or None)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to send messages in that channel.", ephemeral=True)
             return
@@ -250,46 +220,56 @@ class AdminCog(commands.Cog):
             else:
                 await interaction.response.send_message("✅ Sent.", ephemeral=True)
     
+    # =========================
+    # /announce (title optional, message required, optional role ping)
+    # =========================
     @app_commands.command(name="announce", description="Send an announcement embed")
     @app_commands.describe(
-        title="Title of the announcement",
-        message="The announcement message",
+        message="The announcement message (required)",
+        title="Title of the announcement (optional)",
         channel="Channel to send the announcement to (optional)",
-        ping_role="(Optional) Role to ping above the embed"
+        ping_role="Role to ping above the embed (optional)"
     )
     async def announce(
         self,
         interaction: discord.Interaction,
-        title: str,
         message: str,
+        title: Optional[str] = None,
         channel: Optional[discord.TextChannel] = None,
-        ping_role: Optional[discord.Role] = None
+        ping_role: Optional[discord.Role] = None,
     ):
         if not interaction.user.guild_permissions.manage_messages:
             await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
             return
         
         target_channel = channel or interaction.channel
-        embed = discord.Embed(title=title, description=message, color=discord.Color.green())
 
-        self.logger.info(f"Announce command used by {interaction.user} in {interaction.guild.name}")
+        embed = discord.Embed(
+            title=title if title else discord.Embed.Empty,
+            description=message,
+            color=discord.Color.green()
+        )
+
+        self.logger.info(
+            f"Announce command used by {interaction.user} in {interaction.guild.name} "
+            f"(title={'yes' if title else 'no'}, ping_role={getattr(ping_role, 'id', None)})"
+        )
         
         try:
-            if isinstance(target_channel, discord.TextChannel):
-                # Put the role mention in the message content so it renders with gradient & pings.
-                content = ping_role.mention if ping_role else None
-                allowed = discord.AllowedMentions(everyone=False, users=True, roles=[ping_role] if ping_role else True)
-                await target_channel.send(content=content, embed=embed, allowed_mentions=allowed)
-                if target_channel != interaction.channel:
-                    await interaction.response.send_message(
-                        f"✅ Announcement sent to {target_channel.mention}" + (f" (pinged {ping_role.mention})" if ping_role else ""),
-                        ephemeral=True
-                    )
-                else:
-                    await interaction.response.send_message(
-                        "✅ Announcement sent!" + (f" (pinged {ping_role.mention})" if ping_role else ""),
-                        ephemeral=True
-                    )
+            content = ping_role.mention if ping_role else None
+            allowed = discord.AllowedMentions(
+                everyone=False,
+                users=True,
+                roles=[ping_role] if ping_role else True
+            )
+
+            await target_channel.send(content=content, embed=embed, allowed_mentions=allowed)
+
+            note = f" (pinged {ping_role.mention})" if ping_role else ""
+            if target_channel != interaction.channel:
+                await interaction.response.send_message(f"✅ Announcement sent to {target_channel.mention}{note}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"✅ Announcement sent!{note}", ephemeral=True)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to send messages in that channel.", ephemeral=True)
         except Exception as e:
@@ -519,8 +499,7 @@ class AdminCog(commands.Cog):
         if not ctx.author.guild_permissions.manage_messages:
             await ctx.send("❌ You don't have permission to use this command.", delete_after=5)
             return
-        text, allowed = self._render_role_mentions(ctx.guild, message)
-        await ctx.send(text, allowed_mentions=allowed)
+        await ctx.send(message)
     
     @commands.command(name="clear")
     async def prefix_clear(self, ctx, amount: int, member: Optional[discord.Member] = None):
