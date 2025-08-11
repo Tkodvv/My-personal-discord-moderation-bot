@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import sys
+import discord  # <-- added
 from dotenv import load_dotenv
 
 from bot import DiscordBot
@@ -15,6 +16,32 @@ from utils.logging_config import setup_logging
 
 # Load environment variables
 load_dotenv()
+
+DEV_GUILD_ID = os.getenv("DEV_GUILD_ID")  # optional: instant slash updates in one server
+
+async def run_bot(discord_token: str):
+    """Create the bot, load cogs, sync slash commands, and start."""
+    bot = DiscordBot()
+
+    # Load your admin cog (contains the hybrid /alt + !alt)
+    try:
+        await bot.load_extension("cogs.admin")
+    except Exception as e:
+        logging.getLogger(__name__).error("Failed to load cogs.admin: %s", e)
+        raise
+
+    # Sync slash commands (instant if DEV_GUILD_ID is set)
+    try:
+        if DEV_GUILD_ID:
+            await bot.tree.sync(guild=discord.Object(id=int(DEV_GUILD_ID)))
+            logging.getLogger(__name__).info("Slash commands synced to dev guild %s", DEV_GUILD_ID)
+        else:
+            await bot.tree.sync()
+            logging.getLogger(__name__).info("Slash commands synced globally (may take time to appear)")
+    except Exception as e:
+        logging.getLogger(__name__).warning("Slash sync failed: %s", e)
+
+    await bot.start(discord_token)
 
 def main():
     """Main function to start the Discord bot."""
@@ -29,11 +56,10 @@ def main():
         logger.error("Please set your Discord bot token in the .env file or environment variables.")
         sys.exit(1)
     
-    # Create and run the bot
+    # Run the bot (async) so we can load cogs & sync before start
     try:
-        bot = DiscordBot()
         logger.info("Starting Discord Moderation Bot...")
-        bot.run(discord_token)
+        asyncio.run(run_bot(discord_token))
     except KeyboardInterrupt:
         logger.info("Bot shutdown requested by user")
     except Exception as e:
