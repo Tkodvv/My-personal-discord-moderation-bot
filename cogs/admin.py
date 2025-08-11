@@ -6,6 +6,7 @@ and per‑guild bot-mod role management (persistent).
 
 import logging
 import io
+import re  # <-- added
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -48,6 +49,20 @@ class AdminCog(commands.Cog):
             'created_at': message.created_at,
             'deleted_at': datetime.utcnow()
         }
+
+    # ---------- small helper to ensure role mentions actually ping ----------
+    def _allowed_mentions_for_roles(self, guild: discord.Guild, text: Optional[str]) -> discord.AllowedMentions:
+        """
+        Parse <@&ROLE_ID> patterns in text and allow pinging only those roles.
+        If none are found, still allow roles=True so normal @Role mentions work.
+        """
+        if not text:
+            return discord.AllowedMentions(everyone=False, users=True, roles=True)
+        role_ids = {int(m) for m in re.findall(r"<@&(\d{6,25})>", text)}
+        roles = [guild.get_role(rid) for rid in role_ids if guild.get_role(rid)]
+        if roles:
+            return discord.AllowedMentions(everyone=False, users=True, roles=roles)
+        return discord.AllowedMentions(everyone=False, users=True, roles=True)
 
     # =========================================================
     # Bot modlist management (per‑guild, persistent) – SLASH
@@ -206,7 +221,8 @@ class AdminCog(commands.Cog):
         self.logger.info(f"Say command used by {interaction.user} in {interaction.guild.name}")
 
         try:
-            await target.send(content=content, files=files or None)
+            allowed = self._allowed_mentions_for_roles(interaction.guild, content)
+            await target.send(content=content, files=files or None, allowed_mentions=allowed)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to send messages in that channel.", ephemeral=True)
             return
@@ -472,7 +488,9 @@ class AdminCog(commands.Cog):
         if not ctx.author.guild_permissions.manage_messages:
             await ctx.send("❌ You don't have permission to use this command.", delete_after=5)
             return
-        await ctx.send(message)
+
+        allowed = self._allowed_mentions_for_roles(ctx.guild, message)
+        await ctx.send(message, allowed_mentions=allowed)
     
     @commands.command(name="clear")
     async def prefix_clear(self, ctx, amount: int, member: Optional[discord.Member] = None):
