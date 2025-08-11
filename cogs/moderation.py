@@ -34,24 +34,18 @@ class ModerationCog(commands.Cog):
             pass
 
     # ---------- tiny helper to build Dyno-style public embeds ----------
-    def _dyno_style_embed(
-        self,
-        verb_past: str,
-        target: discord.abc.User,
-        reason: str,
-        footer_note: Optional[str] = None
-    ) -> discord.Embed:
+    def _dyno_style_embed(self, verb_past: str, target: discord.abc.User, reason: str) -> tuple[discord.Embed, int]:
         """
-        Build a compact, Dyno-like embed:
+        Build a compact, Dyno-like embed (no author/avatar):
         - color: green (your main color)
-        - author: 'Moderation' with target's avatar
-        - description: "<name> was <verb>.  ***Reason:*** <reason>"
-        - footer: Case #n · User ID · timestamp (+ optional note)
+        - description: "<name> was <verb>.\n***Reason:*** <reason>"
+        - timestamp: now
+        Returns (embed, case_number)
         """
         case_no = self._next_case()
-        name = getattr(target, "display_name", getattr(target, "name", "User"))
+        display = getattr(target, "display_name", getattr(target, "name", "User"))
         desc_lines = [
-            f"**{name}** was {verb_past}.",
+            f"**{display}** was {verb_past}.",
             f"***Reason:*** {reason}"
         ]
         embed = discord.Embed(
@@ -59,18 +53,7 @@ class ModerationCog(commands.Cog):
             color=discord.Color.green(),
             timestamp=discord.utils.utcnow()
         )
-        # Author icon = target avatar, text = 'Moderation'
-        try:
-            icon = target.display_avatar.url  # works for Member/User
-        except Exception:
-            icon = None
-        embed.set_author(name="Moderation", icon_url=icon if icon else discord.Embed.Empty)
-
-        footer_bits = [f"Case #{case_no}", f"User ID: {getattr(target, 'id', 'N/A')}"]
-        if footer_note:
-            footer_bits.append(footer_note)
-        embed.set_footer(text=" • ".join(footer_bits))
-        return embed
+        return embed, case_no
 
     # --------------------
     # KICK (DM + hide mod)
@@ -117,7 +100,12 @@ class ModerationCog(commands.Cog):
             # Perform the kick
             await member.kick(reason=f"Kicked by staff: {reason}")
             # Public confirmation (Dyno style)
-            embed = self._dyno_style_embed("kicked", member, reason)
+            embed, case_no = self._dyno_style_embed("kicked", member, reason)
+            embed.add_field(
+                name="\u200b",
+                value=f"Case #{case_no} · User ID: {member.id}",
+                inline=False
+            )
             await interaction.response.send_message(embed=embed)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to kick this member.", ephemeral=True)
@@ -185,8 +173,11 @@ class ModerationCog(commands.Cog):
                 delete_message_days=delete_messages or 0
             )
             # Public confirmation (Dyno style)
-            note = f"Messages Deleted: {delete_messages} day(s)" if delete_messages else None
-            embed = self._dyno_style_embed("banned", member, reason, footer_note=note)
+            embed, case_no = self._dyno_style_embed("banned", member, reason)
+            extras = [f"Case #{case_no}", f"User ID: {member.id}"]
+            if delete_messages:
+                extras.append(f"Messages Deleted: {delete_messages} day(s)")
+            embed.add_field(name="\u200b", value=" · ".join(extras), inline=False)
             await interaction.response.send_message(embed=embed)  # public
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to ban this member.", ephemeral=True)
@@ -249,9 +240,13 @@ class ModerationCog(commands.Cog):
             # Perform the timeout
             await member.timeout(timeout_until, reason=f"Timed out by staff: {reason}")
             # Public confirmation (Dyno style)
-            nice_until = discord.utils.format_dt(timeout_until, style="f")
-            note = f"Until: {nice_until} · Duration: {duration}m"
-            embed = self._dyno_style_embed("timed out", member, reason, footer_note=note)
+            embed, case_no = self._dyno_style_embed("timed out", member, reason)
+            until_str = discord.utils.format_dt(timeout_until, style="f")
+            embed.add_field(
+                name="\u200b",
+                value=f"Case #{case_no} · User ID: {member.id} · Until: {until_str} · Duration: {duration}m",
+                inline=False
+            )
             await interaction.response.send_message(embed=embed)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to timeout this member.", ephemeral=True)
@@ -299,7 +294,12 @@ class ModerationCog(commands.Cog):
             # Remove the timeout
             await member.timeout(None, reason=f"Timeout removed by staff: {reason}")
             # Public confirmation (Dyno style)
-            embed = self._dyno_style_embed("had their timeout removed", member, reason)
+            embed, case_no = self._dyno_style_embed("had their timeout removed", member, reason)
+            embed.add_field(
+                name="\u200b",
+                value=f"Case #{case_no} · User ID: {member.id}",
+                inline=False
+            )
             await interaction.response.send_message(embed=embed)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to remove timeout from this member.", ephemeral=True)
@@ -338,7 +338,12 @@ class ModerationCog(commands.Cog):
             await interaction.guild.unban(user, reason=f"Unbanned by staff: {reason}")
 
             # Public confirmation (Dyno style)
-            embed = self._dyno_style_embed("unbanned", user, reason)
+            embed, case_no = self._dyno_style_embed("unbanned", user, reason)
+            embed.add_field(
+                name="\u200b",
+                value=f"Case #{case_no} · User ID: {user.id}",
+                inline=False
+            )
             await interaction.response.send_message(embed=embed)
             
         except ValueError:
@@ -370,8 +375,8 @@ class ModerationCog(commands.Cog):
             await ctx.send("❌ I cannot kick this member due to role hierarchy.", delete_after=5)
             return
         
-        # DM best-effort
         try:
+            # DM best-effort
             dm_embed = discord.Embed(
                 title=f"You were kicked from {ctx.guild.name}",
                 description=f"***Reason:*** {reason}",
@@ -386,7 +391,12 @@ class ModerationCog(commands.Cog):
 
         try:
             await member.kick(reason=f"Kicked by staff: {reason}")
-            embed = self._dyno_style_embed("kicked", member, reason)
+            embed, case_no = self._dyno_style_embed("kicked", member, reason)
+            embed.add_field(
+                name="\u200b",
+                value=f"Case #{case_no} · User ID: {member.id}",
+                inline=False
+            )
             await ctx.send(embed=embed)
         except discord.Forbidden:
             await ctx.send("❌ I don't have permission to kick this member.", delete_after=5)
@@ -422,7 +432,12 @@ class ModerationCog(commands.Cog):
 
         try:
             await member.ban(reason=f"Banned by staff: {reason}")
-            embed = self._dyno_style_embed("banned", member, reason)
+            embed, case_no = self._dyno_style_embed("banned", member, reason)
+            embed.add_field(
+                name="\u200b",
+                value=f"Case #{case_no} · User ID: {member.id}",
+                inline=False
+            )
             await ctx.send(embed=embed)
         except discord.Forbidden:
             await ctx.send("❌ I don't have permission to ban this member.", delete_after=5)
@@ -468,10 +483,14 @@ class ModerationCog(commands.Cog):
 
         try:
             await member.timeout(until, reason=f"Timed out by staff: {reason}")
-            nice_until = discord.utils.format_dt(until, style="f")
-            note = f"Until: {nice_until} · Duration: {minutes}m"
-            e = self._dyno_style_embed("timed out", member, reason, footer_note=note)
-            await ctx.send(embed=e)
+            embed, case_no = self._dyno_style_embed("timed out", member, reason)
+            until_str = discord.utils.format_dt(until, style="f")
+            embed.add_field(
+                name="\u200b",
+                value=f"Case #{case_no} · User ID: {member.id} · Until: {until_str} · Duration: {minutes}m",
+                inline=False
+            )
+            await ctx.send(embed=embed)
         except discord.Forbidden:
             await ctx.send("❌ I don't have permission to timeout this member.", delete_after=5)
 
@@ -502,8 +521,13 @@ class ModerationCog(commands.Cog):
 
         try:
             await member.timeout(None, reason=f"Timeout removed by staff: {reason}")
-            e = self._dyno_style_embed("had their timeout removed", member, reason)
-            await ctx.send(embed=e)
+            embed, case_no = self._dyno_style_embed("had their timeout removed", member, reason)
+            embed.add_field(
+                name="\u200b",
+                value=f"Case #{case_no} · User ID: {member.id}",
+                inline=False
+            )
+            await ctx.send(embed=embed)
         except discord.Forbidden:
             await ctx.send("❌ I don't have permission to remove timeout from this member.", delete_after=5)
 
@@ -533,7 +557,12 @@ class ModerationCog(commands.Cog):
             await ctx.guild.unban(user, reason=f"Unbanned by staff: {reason}")
 
             # Public confirmation (Dyno style)
-            embed = self._dyno_style_embed("unbanned", user, reason)
+            embed, case_no = self._dyno_style_embed("unbanned", user, reason)
+            embed.add_field(
+                name="\u200b",
+                value=f"Case #{case_no} · User ID: {user.id}",
+                inline=False
+            )
             await ctx.send(embed=embed)
 
         except discord.NotFound:
