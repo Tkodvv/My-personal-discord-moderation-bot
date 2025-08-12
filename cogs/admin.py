@@ -1,19 +1,73 @@
 """
 Admin Cog
 Contains administrative commands like say, announce, clear, prefix management,
-and per-guild bot-mod role management (persistent).
+and per-guild bot-mod role management (persistent). Also includes /alt.
 """
 
 import logging
 import io
-import os  # <-- added
+import os
+import httpx
 import discord
 from discord.ext import commands
 from discord import app_commands
 from datetime import datetime
 from typing import Optional
 from discord.utils import utcnow, format_dt
-from roblox_alts import get_alt_public  # <-- added
+
+# ---------------------------
+# Inline Roblox Alt API client
+# Defaults: POST + x-api-key to https://trigen.io/api/alt/generate
+# ---------------------------
+async def get_alt_public():
+    API_KEY  = os.getenv("TRIGEN_API_KEY")
+    API_BASE = (os.getenv("TRIGEN_BASE", "https://trigen.io") or "").rstrip("/")
+    ENDPOINT = os.getenv("TRIGEN_ALT_ENDPOINT", "/api/alt/generate")
+    METHOD   = os.getenv("TRIGEN_METHOD", "POST").upper()  # match the curl doc
+    if not API_KEY:
+        raise RuntimeError("TRIGEN_API_KEY missing")
+
+    url = f"{API_BASE}{ENDPOINT}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "SliceMod/1.0",
+        "x-api-key": API_KEY,  # doc shows x-api-key header
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        # provider shows POST with no body; if 405/404, try GET automatically
+        r = await client.request(METHOD, url, headers=headers)
+        if r.status_code in (404, 405):
+            fallback = "GET" if METHOD == "POST" else "POST"
+            r = await client.request(fallback, url, headers=headers)
+
+        r.raise_for_status()
+        data = r.json()
+
+    # map common fields safely
+    username = (data.get("username") or data.get("name") or data.get("user") or "").strip()
+    password = (data.get("password") or data.get("pass") or data.get("pwd") or "").strip()
+    user_id  = str(data.get("userId") or data.get("id") or data.get("userid") or "")
+
+    created_raw = (
+        data.get("createdAt") or data.get("creationDate") or
+        data.get("created_at") or data.get("created") or ""
+    )
+    avatar_url = data.get("avatarUrl") or data.get("avatar_url")
+
+    # keep unknown extras in meta (don’t include sensitive keys)
+    core = {"username","name","user","password","pass","pwd","userId","id","userid",
+            "createdAt","creationDate","created_at","created","avatarUrl","avatar_url"}
+    meta = {k: v for k, v in data.items() if k not in core}
+
+    return {
+        "username": username,
+        "password": password,
+        "userId": user_id,
+        "createdAt": created_raw,
+        "avatarUrl": avatar_url,
+        "meta": meta,
+    }
 
 class AdminCog(commands.Cog):
     """Administrative commands cog."""
@@ -52,71 +106,103 @@ class AdminCog(commands.Cog):
         }
 
     # =========================================================
-    # HYBRID: /alt + !alt  (read-only, safe; requires Manage Server)
+    # HYBRID: /alt + !alt  (rich embed; Manage Server; 5s cooldown)
     # =========================================================
-    @commands.hybrid_command(name="alt", description="Show an owned alt (no credentials).")
+    @commands.hybrid_command(name="alt", description="Generate a Roblox alt and return it privately.")
     @commands.has_permissions(manage_guild=True)
-    @commands.cooldown(1, 5, commands.BucketType.guild)  # 1 use / 5s per guild
+    @commands.cooldown(1, 5, commands.BucketType.guild)
     async def alt(self, ctx: commands.Context):
-        # feature toggle via env
-        enabled = os.getenv("MOD_ENABLE_RBX_ALT", "false").lower() in {"1", "true", "yes", "y"}
+        import datetime as dt
+
+        enabled = os.getenv("MOD_ENABLE_RBX_ALT", "false").lower() in {"1","true","yes","y"}
+        show_pw = os.getenv("ALT_SHOW_PASSWORD", "true").lower() in {"1","true","yes","y"}
+        is_slash = getattr(ctx, "interaction", None) is not None
+
         if not enabled:
-            if getattr(ctx, "interaction", None):
+            if is_slash:
                 await ctx.reply("alts feature is disabled.", ephemeral=True)
             else:
                 await ctx.send("alts feature is disabled.")
             return
 
-        try:
-            # handle slash defer & correct sender
-            send = ctx.send
-            if getattr(ctx, "interaction", None):
-                try:
-                    await ctx.interaction.response.defer()
-                except Exception:
-                    pass
-                send = ctx.interaction.followup.send
+        # choose sender: ephemeral followup for slash; DM for prefix
+        if is_slash:
+            try:
+                await ctx.interaction.response.defer(ephemeral=True)
+            except Exception:
+                pass
+            send = ctx.interaction.followup.send
+        else:
+            send = ctx.author.send
 
+        try:
             prof = await get_alt_public()
             if not prof or not prof.get("username"):
-                await send("couldn't fetch an alt right now.")
+                await send("couldn't fetch a random alt rn, try again later.")
                 return
 
-            embed = discord.Embed(
-                title=prof.get("displayName") or prof.get("username") or "Roblox Alt",
-                description=prof.get("bio") or "no bio",
-                color=0x00b2ff,
-            )
-            if prof.get("avatarUrl"):
-                embed.set_thumbnail(url=prof["avatarUrl"])
-            embed.add_field(name="Username", value=prof["username"], inline=True)
+            username = (prof.get("username") or "").strip()
+            password = (prof.get("password") or "").strip()
+            user_id  = str(prof.get("userId") or "")
+            created_raw = prof.get("createdAt") or ""
+            avatar_url  = prof.get("avatarUrl")
 
-            # optional safe meta
-            meta = prof.get("meta") or {}
-            if isinstance(meta, dict):
-                note = str(meta.get("note", ""))[:150]
-                expires = meta.get("expiresAt") or meta.get("expires_at")
-                if note:
-                    embed.add_field(name="Note", value=note, inline=False)
-                if expires:
-                    embed.add_field(name="Expires", value=str(expires), inline=True)
+            # parse creation date into M/D/YYYY if possible
+            creation_date = None
+            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%m/%d/%Y", "%Y-%m-%d"):
+                try:
+                    creation_date = dt.datetime.strptime(created_raw, fmt).strftime("%-m/%-d/%Y")
+                    break
+                except Exception:
+                    pass
+            if not creation_date and created_raw:
+                creation_date = str(created_raw)
+
+            embed = discord.Embed(
+                title="Generated Roblox Account",
+                description="Your account has been generated successfully! Keep it safe and **do not share it with anyone.**",
+                color=discord.Color.red()
+            )
+            if avatar_url:
+                embed.set_thumbnail(url=avatar_url)
+
+            embed.add_field(name="Username", value=f"`{username}`", inline=False)
+            if show_pw and password:
+                embed.add_field(name="Password", value=f"`{password}`", inline=False)
+            if user_id:
+                embed.add_field(name="User ID", value=f"`{user_id}`", inline=False)
+            if creation_date:
+                embed.add_field(name="Creation Date", value=f"`{creation_date}`", inline=False)
+            embed.set_footer(text="You must change the password to keep the account!")
 
             await send(embed=embed)
 
+            # for prefix use, confirm in-channel and clean up the invoking message
+            if not is_slash:
+                try:
+                    await ctx.message.delete()
+                except Exception:
+                    pass
+                try:
+                    await ctx.send("✅ Sent the account details to your DMs.", delete_after=5)
+                except Exception:
+                    pass
+
         except commands.CommandOnCooldown as e:
             msg = f"slow down — try again in {e.retry_after:.1f}s"
-            if getattr(ctx, "interaction", None):
+            if is_slash:
                 await ctx.reply(msg, ephemeral=True)
             else:
                 await ctx.send(msg)
         except commands.MissingPermissions:
-            if getattr(ctx, "interaction", None):
+            if is_slash:
                 await ctx.reply("you need Manage Server to use this.", ephemeral=True)
             else:
                 await ctx.send("you need Manage Server to use this.")
         except Exception as e:
-            logging.getLogger(__name__).error("alt command failed: %s", e)
-            if getattr(ctx, "interaction", None):
+            # do not log sensitive values
+            self.logger.error("alt command failed: %s", e)
+            if is_slash:
                 await ctx.reply("couldn't fetch a random alt rn, try again later.", ephemeral=True)
             else:
                 await ctx.send("couldn't fetch a random alt rn, try again later.")
@@ -295,7 +381,7 @@ class AdminCog(commands.Cog):
                 await interaction.response.send_message("✅ Sent.", ephemeral=True)
     
     # =========================
-    # /announce (title optional, message required, optional role ping)
+    # /announce
     # =========================
     @app_commands.command(name="announce", description="Send an announcement embed")
     @app_commands.describe(
@@ -318,7 +404,6 @@ class AdminCog(commands.Cog):
         
         target_channel = channel or interaction.channel
 
-        # Build embed with optional title (avoid Embed.Empty attribute)
         embed = discord.Embed(description=message, color=discord.Color.green())
         if title:
             embed.title = title
@@ -330,15 +415,12 @@ class AdminCog(commands.Cog):
         
         try:
             content = ping_role.mention if ping_role else None
-            # Limit mentions to the one role if provided; otherwise allow role mentions normally
             allowed = discord.AllowedMentions(
                 everyone=False,
                 users=True,
                 roles=[ping_role] if ping_role else True
             )
-
             await target_channel.send(content=content, embed=embed, allowed_mentions=allowed)
-
             note = f" (pinged {ping_role.mention})" if ping_role else ""
             if target_channel != interaction.channel:
                 await interaction.response.send_message(f"✅ Announcement sent to {target_channel.mention}{note}", ephemeral=True)
