@@ -69,6 +69,42 @@ async def get_alt_public():
         "meta": meta,
     }
 
+# ---------------------------
+# Roblox avatar fallbacks
+# ---------------------------
+async def _roblox_id_from_username(username: str) -> Optional[str]:
+    """Resolve Roblox userId from username via public API."""
+    try:
+        body = {"usernames": [username], "excludeBannedUsers": True}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post("https://users.roblox.com/v1/usernames/users", json=body)
+            r.raise_for_status()
+            js = r.json()
+            arr = js.get("data", [])
+            if arr:
+                return str(arr[0].get("id"))
+    except Exception:
+        pass
+    return None
+
+async def _roblox_avatar_url_from_id(user_id: str) -> Optional[str]:
+    """Fetch a square headshot URL for a Roblox userId."""
+    try:
+        url = (
+            "https://thumbnails.roblox.com/v1/users/"
+            f"avatar-headshot?userIds={user_id}&size=150x150&format=Png&isCircular=false"
+        )
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            js = r.json()
+            arr = js.get("data", [])
+            if arr and arr[0].get("state") == "Completed":
+                return arr[0].get("imageUrl")
+    except Exception:
+        pass
+    return None
+
 class AdminCog(commands.Cog):
     """Administrative commands cog."""
     
@@ -116,6 +152,7 @@ class AdminCog(commands.Cog):
 
         enabled = os.getenv("MOD_ENABLE_RBX_ALT", "false").lower() in {"1","true","yes","y"}
         show_pw = os.getenv("ALT_SHOW_PASSWORD", "true").lower() in {"1","true","yes","y"}
+        fetch_avatar_ok = os.getenv("ALT_FETCH_ROBLOX_AVATAR", "true").lower() in {"1","true","yes","y"}
         is_slash = getattr(ctx, "interaction", None) is not None
 
         if not enabled:
@@ -147,11 +184,19 @@ class AdminCog(commands.Cog):
             created_raw = prof.get("createdAt") or ""
             avatar_url  = prof.get("avatarUrl")
 
-            # parse creation date into M/D/YYYY if possible
+            # --- Fallback avatar fetch (if provider didn't send one) ---
+            if fetch_avatar_ok and not avatar_url:
+                if not user_id and username:
+                    user_id = await _roblox_id_from_username(username) or user_id
+                if user_id:
+                    avatar_url = await _roblox_avatar_url_from_id(user_id) or avatar_url
+
+            # parse creation date into M/D/YYYY if possible (Windows-safe)
             creation_date = None
             for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%m/%d/%Y", "%Y-%m-%d"):
                 try:
-                    creation_date = dt.datetime.strptime(created_raw, fmt).strftime("%-m/%-d/%Y")
+                    d = dt.datetime.strptime(created_raw, fmt)
+                    creation_date = f"{d.month}/{d.day}/{d.year}"
                     break
                 except Exception:
                     pass
