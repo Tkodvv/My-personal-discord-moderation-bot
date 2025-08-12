@@ -112,36 +112,30 @@ class AdminCog(commands.Cog):
         show_pw = os.getenv("ALT_SHOW_PASSWORD", "true").lower() in {"1","true","yes","y"}
         is_slash = getattr(ctx, "interaction", None) is not None
 
-        async def _slash_reply(msg: str):
-            """Safe ephemeral reply for slash branch."""
+        async def _slash_reply(msg: str, *, ephemeral: bool = True):
+            """Safe reply helper for slash branch."""
             if not is_slash:
                 return
             try:
                 if not ctx.interaction.response.is_done():
-                    await ctx.interaction.response.send_message(msg, ephemeral=True)
+                    await ctx.interaction.response.send_message(msg, ephemeral=ephemeral)
                 else:
-                    await ctx.interaction.followup.send(msg, ephemeral=True)
+                    await ctx.interaction.followup.send(msg, ephemeral=ephemeral)
             except Exception:
                 pass
 
         if not enabled:
-            if is_slash:
-                await _slash_reply("alts feature is disabled.")
-            else:
-                await ctx.send("alts feature is disabled.")
-            return
+            return await _slash_reply("alts feature is disabled.") if is_slash else await ctx.send("alts feature is disabled.")
 
         member = ctx.author if isinstance(ctx.author, discord.Member) else None
         if not (member and self.bot.allow_alt(member)):
-            if is_slash:
-                await _slash_reply("❌ You’re not allowed to use `/alt` in this server.")
-            else:
-                await ctx.send("❌ You’re not allowed to use `!alt` in this server.", delete_after=5)
-            return
+            return await _slash_reply("❌ You’re not allowed to use `/alt` in this server.", ephemeral=True) \
+                   if is_slash else await ctx.send("❌ You’re not allowed to use `!alt` in this server.", delete_after=5)
 
+        # For slash: defer NON-ephemeral so the final success message can be public
         if is_slash:
             try:
-                await ctx.interaction.response.defer(ephemeral=True)
+                await ctx.interaction.response.defer()  # <- not ephemeral
             except Exception:
                 pass
 
@@ -149,9 +143,9 @@ class AdminCog(commands.Cog):
             prof = await get_alt_public()
             if not prof or not prof.get("username"):
                 if is_slash:
-                    await ctx.interaction.followup.send("couldn't fetch a random alt rn, try again later.", ephemeral=True)
+                    await ctx.interaction.followup.send("❌ couldn't fetch a random alt rn, try again later.")
                 else:
-                    await ctx.send("couldn't fetch a random alt rn, try again later.", delete_after=6)
+                    await ctx.send("❌ couldn't fetch a random alt rn, try again later.", delete_after=6)
                 return
 
             username = (prof.get("username") or "").strip()
@@ -194,8 +188,7 @@ class AdminCog(commands.Cog):
             except discord.Forbidden:
                 if is_slash:
                     await ctx.interaction.followup.send(
-                        "❌ I couldn't DM you. Please enable DMs from server members and try again.",
-                        ephemeral=True
+                        "❌ I couldn't DM you. Please enable DMs from server members and try again."
                     )
                 else:
                     await ctx.send(
@@ -204,30 +197,27 @@ class AdminCog(commands.Cog):
                     )
                 return
 
+            # Success confirmation (public for slash, short notice for prefix)
+            success_msg = "✅ Account successfully generated — details have been sent to your direct messages."
             if is_slash:
-                await ctx.interaction.followup.send("✅ Sent the account details to your DMs.", ephemeral=True)
+                await ctx.interaction.followup.send(success_msg)  # <- NOT ephemeral
             else:
                 try:
                     await ctx.message.delete()
                 except Exception:
                     pass
                 try:
-                    await ctx.send("✅ Sent the account details to your DMs.", delete_after=5)
+                    await ctx.send(success_msg, delete_after=5)
                 except Exception:
                     pass
 
         except commands.CommandOnCooldown as e:
             msg = f"slow down — try again in {e.retry_after:.1f}s"
-            if is_slash:
-                await _slash_reply(msg)
-            else:
-                await ctx.send(msg)
+            return await _slash_reply(msg, ephemeral=True) if is_slash else await ctx.send(msg)
         except Exception as e:
             self.logger.error("alt command failed: %s", e)
-            if is_slash:
-                await _slash_reply("couldn't fetch a random alt rn, try again later.")
-            else:
-                await ctx.send("couldn't fetch a random alt rn, try again later.")
+            return await _slash_reply("couldn't fetch a random alt rn, try again later.", ephemeral=True) \
+                   if is_slash else await ctx.send("couldn't fetch a random alt rn, try again later.")
 
     # =========================================================
     # Alt Whitelist (slash) — uses bot's PERSISTENT storage
