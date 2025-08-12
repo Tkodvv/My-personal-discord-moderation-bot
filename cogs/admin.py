@@ -83,6 +83,9 @@ class AdminCog(commands.Cog):
             1379755293797384202,
         }
 
+        # >>> NEW: global "no ping" policy you can reuse in sends <<<
+        self.no_pings = discord.AllowedMentions.none()
+
     async def delete_command_message(self, ctx):
         try:
             await ctx.message.delete()
@@ -229,8 +232,11 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
             return
         self.bot.add_alt_user(interaction.guild.id, user.id)
-        # PUBLIC message (removed ephemeral=True)
-        await interaction.response.send_message(f"✅ {user.mention} whitelisted for /alt.")
+        # PUBLIC message but suppress real pings
+        await interaction.response.send_message(
+            f"✅ {user.mention} whitelisted for /alt.",
+            allowed_mentions=self.no_pings
+        )
 
     @app_commands.command(name="alt_whitelist_remove", description="Remove a user from the /alt whitelist.")
     @app_commands.describe(user="User to remove")
@@ -240,8 +246,7 @@ class AdminCog(commands.Cog):
             return
         removed = self.bot.remove_alt_user(interaction.guild.id, user.id)
         msg = f"✅ Removed {user.mention} from whitelist." if removed else f"ℹ️ {user.mention} wasn’t whitelisted."
-        # PUBLIC message (removed ephemeral=True)
-        await interaction.response.send_message(msg)
+        await interaction.response.send_message(msg, allowed_mentions=self.no_pings)
 
     @app_commands.command(name="alt_whitelist_list", description="Show users whitelisted for /alt in this server.")
     async def alt_whitelist_list(self, interaction: discord.Interaction):
@@ -250,15 +255,16 @@ class AdminCog(commands.Cog):
             return
         ids = sorted(self.bot.get_alt_users(interaction.guild.id))
         if not ids:
-            # PUBLIC message (removed ephemeral=True)
             await interaction.response.send_message("No users are whitelisted.")
             return
         mentions = []
         for uid in ids:
             u = interaction.guild.get_member(uid) or await interaction.client.fetch_user(uid)
             mentions.append(u.mention if u else f"<@{uid}>")
-        # PUBLIC message (removed ephemeral=True)
-        await interaction.response.send_message("Whitelisted: " + ", ".join(mentions))
+        await interaction.response.send_message(
+            "Whitelisted: " + ", ".join(mentions),
+            allowed_mentions=self.no_pings
+        )
 
     # =========================================================
     # Bot modlist management (per-guild, persistent) – SLASH
@@ -282,7 +288,8 @@ class AdminCog(commands.Cog):
 
         await interaction.response.send_message(
             f"✅ Added {role.mention}.\n**Current mod roles:** {text}",
-            ephemeral=True
+            ephemeral=True,
+            allowed_mentions=self.no_pings
         )
 
     @app_commands.command(name="removemod", description="Remove a role from this guild's bot-mod list.")
@@ -307,7 +314,8 @@ class AdminCog(commands.Cog):
 
         await interaction.response.send_message(
             f"✅ Removed {role.mention}.\n**Current mod roles:** {text}",
-            ephemeral=True
+            ephemeral=True,
+            allowed_mentions=self.no_pings
         )
 
     @app_commands.command(name="listmods", description="Show this guild's bot-mod roles.")
@@ -332,7 +340,7 @@ class AdminCog(commands.Cog):
         if missing:
             lines.append("**Dangling IDs (role deleted?):** " + ", ".join(str(x) for x in missing))
 
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await interaction.response.send_message("\n".join(lines), ephemeral=True, allowed_mentions=self.no_pings)
 
     # =========================================================
     # Bot modlist management – PREFIX
@@ -342,7 +350,7 @@ class AdminCog(commands.Cog):
     async def p_addmod(self, ctx, role: discord.Role):
         self.bot.add_guild_mod_role(ctx.guild.id, role.id)
         await self.delete_command_message(ctx)
-        await ctx.send(f"✅ Added {role.mention} to the bot-mod list.", delete_after=5)
+        await ctx.send(f"✅ Added {role.mention} to the bot-mod list.", delete_after=5, allowed_mentions=self.no_pings)
 
     @commands.command(name="removemod")
     @commands.has_permissions(administrator=True)
@@ -350,7 +358,7 @@ class AdminCog(commands.Cog):
         removed = self.bot.remove_guild_mod_role(ctx.guild.id, role.id)
         await self.delete_command_message(ctx)
         msg = "✅ Removed." if removed else "ℹ️ That role wasn’t on the list."
-        await ctx.send(msg, delete_after=5)
+        await ctx.send(msg, delete_after=5, allowed_mentions=self.no_pings)
 
     @commands.command(name="modlist")
     @commands.has_permissions(manage_guild=True)
@@ -359,7 +367,7 @@ class AdminCog(commands.Cog):
         ids = self.bot.get_guild_mod_role_ids(ctx.guild.id)
         mentions = [r.mention for r in (ctx.guild.get_role(i) for i in ids) if r]
         text = ", ".join(mentions) if mentions else "_(none)_"
-        await ctx.send("**Mod roles:** " + text, delete_after=10)
+        await ctx.send("**Mod roles:** " + text, delete_after=10, allowed_mentions=self.no_pings)
 
     # =========================
     # /say (text + attachments)
@@ -413,6 +421,7 @@ class AdminCog(commands.Cog):
         self.logger.info(f"Say command used by {interaction.user} in {interaction.guild.name}")
 
         try:
+            # keep /say behavior unchanged – you can still ping if you type a mention
             allowed = discord.AllowedMentions(everyone=False, users=True, roles=True)
             await target.send(content=content, files=files or None, allowed_mentions=allowed)
         except discord.Forbidden:
@@ -505,12 +514,15 @@ class AdminCog(commands.Cog):
                     return message.author == user
                 deleted = await interaction.channel.purge(limit=amount * 2, check=check)
                 deleted_count = len(deleted)
-                await interaction.followup.send(f"✅ Deleted {deleted_count} messages from {user.mention}", ephemeral=True)
+                await interaction.followup.send(
+                    f"✅ Deleted {deleted_count} messages from {user.mention}",
+                    ephemeral=True,
+                    allowed_mentions=self.no_pings
+                )
             else:
                 deleted = await interaction.channel.purge(limit=amount)
                 deleted_count = len(deleted)
                 await interaction.followup.send(f"✅ Deleted {deleted_count} messages", ephemeral=True)
-
             self.logger.info(f"Clear command used by {interaction.user} - deleted {deleted_count} messages in {interaction.guild.name}")
 
         except discord.Forbidden:
@@ -613,7 +625,7 @@ class AdminCog(commands.Cog):
             embed.add_field(name="Time", value=format_dt(utcnow(), style="F"), inline=False)
             embed.set_footer(text=f"Changed by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
 
-            await interaction.response.send_message(embed=embed)
+            await interaction.response.send_message(embed=embed, allowed_mentions=self.no_pings)
             self.logger.info(f"Nickname changed for {member} by {interaction.user}: {old_nick} -> {nickname or member.name}")
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to change this member's nickname.", ephemeral=True)
@@ -650,7 +662,7 @@ class AdminCog(commands.Cog):
             embed.add_field(name="Role Added", value=role.mention, inline=True)
             embed.add_field(name="Time", value=format_dt(utcnow(), style="F"), inline=False)
             embed.set_footer(text=f"Added by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
-            await interaction.response.send_message(embed=embed)
+            await interaction.response.send_message(embed=embed, allowed_mentions=self.no_pings)
             self.logger.info(f"Role {role.name} added to {member} by {interaction.user}")
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to add this role.", ephemeral=True)
@@ -689,7 +701,7 @@ class AdminCog(commands.Cog):
         embed.set_footer(text=f"Added by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
         embed.set_thumbnail(url=user.display_avatar.url)
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, allowed_mentions=self.no_pings)
         self.logger.info(f"User {user} added to watch list by {interaction.user} - Reason: {reason}")
 
     # =========================
