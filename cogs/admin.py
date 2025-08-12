@@ -1,7 +1,7 @@
 """
 Admin Cog
 Contains administrative commands like say, announce, clear, prefix management,
-and per-guild bot-mod role management (persistent). Also includes /alt.
+and per-guild bot-mod role management (persistent). Also includes /alt with whitelist.
 """
 
 import logging
@@ -12,8 +12,10 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Set
 from discord.utils import utcnow, format_dt
+
+log = logging.getLogger(__name__)
 
 # ---------------------------
 # Inline Roblox Alt API client
@@ -23,7 +25,7 @@ async def get_alt_public():
     API_KEY  = os.getenv("TRIGEN_API_KEY")
     API_BASE = (os.getenv("TRIGEN_BASE", "https://trigen.io") or "").rstrip("/")
     ENDPOINT = os.getenv("TRIGEN_ALT_ENDPOINT", "/api/alt/generate")
-    METHOD   = os.getenv("TRIGEN_METHOD", "POST").upper()  # match the curl doc
+    METHOD   = os.getenv("TRIGEN_METHOD", "POST").upper()
     if not API_KEY:
         raise RuntimeError("TRIGEN_API_KEY missing")
 
@@ -31,11 +33,10 @@ async def get_alt_public():
     headers = {
         "Accept": "application/json",
         "User-Agent": "SliceMod/1.0",
-        "x-api-key": API_KEY,  # doc shows x-api-key header
+        "x-api-key": API_KEY,
     }
 
     async with httpx.AsyncClient(timeout=20.0) as client:
-        # provider shows POST with no body; if 405/404, try GET automatically
         r = await client.request(METHOD, url, headers=headers)
         if r.status_code in (404, 405):
             fallback = "GET" if METHOD == "POST" else "POST"
@@ -44,7 +45,6 @@ async def get_alt_public():
         r.raise_for_status()
         data = r.json()
 
-    # map common fields safely
     username = (data.get("username") or data.get("name") or data.get("user") or "").strip()
     password = (data.get("password") or data.get("pass") or data.get("pwd") or "").strip()
     user_id  = str(data.get("userId") or data.get("id") or data.get("userid") or "")
@@ -55,7 +55,6 @@ async def get_alt_public():
     )
     avatar_url = data.get("avatarUrl") or data.get("avatar_url")
 
-    # keep unknown extras in meta (don’t include sensitive keys)
     core = {"username","name","user","password","pass","pwd","userId","id","userid",
             "createdAt","creationDate","created_at","created","avatarUrl","avatar_url"}
     meta = {k: v for k, v in data.items() if k not in core}
@@ -69,50 +68,13 @@ async def get_alt_public():
         "meta": meta,
     }
 
-# ---------------------------
-# Roblox avatar fallbacks
-# ---------------------------
-async def _roblox_id_from_username(username: str) -> Optional[str]:
-    """Resolve Roblox userId from username via public API."""
-    try:
-        body = {"usernames": [username], "excludeBannedUsers": True}
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post("https://users.roblox.com/v1/usernames/users", json=body)
-            r.raise_for_status()
-            js = r.json()
-            arr = js.get("data", [])
-            if arr:
-                return str(arr[0].get("id"))
-    except Exception:
-        pass
-    return None
-
-async def _roblox_avatar_url_from_id(user_id: str) -> Optional[str]:
-    """Fetch a square headshot URL for a Roblox userId."""
-    try:
-        url = (
-            "https://thumbnails.roblox.com/v1/users/"
-            f"avatar-headshot?userIds={user_id}&size=150x150&format=Png&isCircular=false"
-        )
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            js = r.json()
-            arr = js.get("data", [])
-            if arr and arr[0].get("state") == "Completed":
-                return arr[0].get("imageUrl")
-    except Exception:
-        pass
-    return None
-
 class AdminCog(commands.Cog):
     """Administrative commands cog."""
-    
+
     def __init__(self, bot):
         self.bot = bot
         self.logger = logging.getLogger(__name__)
-        # Store deleted messages for snipe command
-        self.deleted_messages = {}
+        self.deleted_messages: Dict[int, dict] = {}
 
         # Allowed roles for /say (you can remove this if you want to fully rely on modlist)
         self.allowed_say_roles = {
@@ -120,20 +82,41 @@ class AdminCog(commands.Cog):
             1349191381310111824,
             1379755293797384202,
         }
-    
+
+        # in-memory whitelist per guild for /alt (persist to DB if you want later)
+        self._alt_whitelists: Dict[int, Set[int]] = {}
+
+    # ---------- whitelist helpers ----------
+    def _wl_get(self, guild_id: int) -> Set[int]:
+        wl = self._alt_whitelists.get(guild_id)
+        if wl is None:
+            wl = set()
+            self._alt_whitelists[guild_id] = wl
+        return wl
+
+    def _wl_add(self, guild_id: int, user_id: int) -> bool:
+        wl = self._wl_get(guild_id)
+        before = len(wl)
+        wl.add(int(user_id))
+        return len(wl) > before
+
+    def _wl_remove(self, guild_id: int, user_id: int) -> bool:
+        wl = self._wl_get(guild_id)
+        if int(user_id) in wl:
+            wl.remove(int(user_id))
+            return True
+        return False
+
     async def delete_command_message(self, ctx):
-        """Helper to delete the command message."""
         try:
             await ctx.message.delete()
         except (discord.NotFound, discord.Forbidden):
             pass
-        
+
     @commands.Cog.listener()
     async def on_message_delete(self, message):
-        """Store deleted messages for snipe command."""
         if message.author.bot:
             return
-        
         self.deleted_messages[message.channel.id] = {
             'content': message.content,
             'author': message.author,
@@ -142,17 +125,15 @@ class AdminCog(commands.Cog):
         }
 
     # =========================================================
-    # HYBRID: /alt + !alt  (rich embed; Manage Server; 5s cooldown)
+    # HYBRID: /alt + !alt  (DM creds; Manage Server OR whitelisted; 5s cooldown)
     # =========================================================
-    @commands.hybrid_command(name="alt", description="Generate a Roblox alt and return it privately.")
-    @commands.has_permissions(manage_guild=True)
+    @commands.hybrid_command(name="alt", description="Generate a Roblox alt and DM the credentials to you.")
     @commands.cooldown(1, 5, commands.BucketType.guild)
     async def alt(self, ctx: commands.Context):
         import datetime as dt
 
         enabled = os.getenv("MOD_ENABLE_RBX_ALT", "false").lower() in {"1","true","yes","y"}
         show_pw = os.getenv("ALT_SHOW_PASSWORD", "true").lower() in {"1","true","yes","y"}
-        fetch_avatar_ok = os.getenv("ALT_FETCH_ROBLOX_AVATAR", "true").lower() in {"1","true","yes","y"}
         is_slash = getattr(ctx, "interaction", None) is not None
 
         if not enabled:
@@ -162,20 +143,30 @@ class AdminCog(commands.Cog):
                 await ctx.send("alts feature is disabled.")
             return
 
-        # choose sender: ephemeral followup for slash; DM for prefix
+        member = ctx.author if isinstance(ctx.author, discord.Member) else None
+        is_admin = bool(member and member.guild_permissions.manage_guild)
+        is_whitelisted = bool(member and member.guild and member.id in self._wl_get(member.guild.id))
+        if not (is_admin or is_whitelisted):
+            msg = "❌ You’re not allowed to use `/alt` in this server."
+            if is_slash:
+                await ctx.reply(msg, ephemeral=True)
+            else:
+                await ctx.send(msg, delete_after=5)
+            return
+
         if is_slash:
             try:
                 await ctx.interaction.response.defer(ephemeral=True)
             except Exception:
                 pass
-            send = ctx.interaction.followup.send
-        else:
-            send = ctx.author.send
 
         try:
             prof = await get_alt_public()
             if not prof or not prof.get("username"):
-                await send("couldn't fetch a random alt rn, try again later.")
+                if is_slash:
+                    await ctx.interaction.followup.send("couldn't fetch a random alt rn, try again later.", ephemeral=True)
+                else:
+                    await ctx.send("couldn't fetch a random alt rn, try again later.", delete_after=6)
                 return
 
             username = (prof.get("username") or "").strip()
@@ -184,19 +175,11 @@ class AdminCog(commands.Cog):
             created_raw = prof.get("createdAt") or ""
             avatar_url  = prof.get("avatarUrl")
 
-            # --- Fallback avatar fetch (if provider didn't send one) ---
-            if fetch_avatar_ok and not avatar_url:
-                if not user_id and username:
-                    user_id = await _roblox_id_from_username(username) or user_id
-                if user_id:
-                    avatar_url = await _roblox_avatar_url_from_id(user_id) or avatar_url
-
-            # parse creation date into M/D/YYYY if possible (Windows-safe)
+            # parse creation date into M/D/YYYY if possible
             creation_date = None
             for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%m/%d/%Y", "%Y-%m-%d"):
                 try:
-                    d = dt.datetime.strptime(created_raw, fmt)
-                    creation_date = f"{d.month}/{d.day}/{d.year}"
+                    creation_date = dt.datetime.strptime(created_raw, fmt).strftime("%-m/%-d/%Y")
                     break
                 except Exception:
                     pass
@@ -220,10 +203,25 @@ class AdminCog(commands.Cog):
                 embed.add_field(name="Creation Date", value=f"`{creation_date}`", inline=False)
             embed.set_footer(text="You must change the password to keep the account!")
 
-            await send(embed=embed)
+            # Always DM the credentials
+            try:
+                await ctx.author.send(embed=embed)
+            except discord.Forbidden:
+                if is_slash:
+                    await ctx.interaction.followup.send(
+                        "❌ I couldn't DM you. Please enable DMs from server members and try again.",
+                        ephemeral=True
+                    )
+                else:
+                    await ctx.send(
+                        "❌ I couldn't DM you. Please enable DMs from server members and try again.",
+                        delete_after=8
+                    )
+                return
 
-            # for prefix use, confirm in-channel and clean up the invoking message
-            if not is_slash:
+            if is_slash:
+                await ctx.interaction.followup.send("✅ Sent the account details to your DMs.", ephemeral=True)
+            else:
                 try:
                     await ctx.message.delete()
                 except Exception:
@@ -239,13 +237,7 @@ class AdminCog(commands.Cog):
                 await ctx.reply(msg, ephemeral=True)
             else:
                 await ctx.send(msg)
-        except commands.MissingPermissions:
-            if is_slash:
-                await ctx.reply("you need Manage Server to use this.", ephemeral=True)
-            else:
-                await ctx.send("you need Manage Server to use this.")
         except Exception as e:
-            # do not log sensitive values
             self.logger.error("alt command failed: %s", e)
             if is_slash:
                 await ctx.reply("couldn't fetch a random alt rn, try again later.", ephemeral=True)
@@ -253,9 +245,46 @@ class AdminCog(commands.Cog):
                 await ctx.send("couldn't fetch a random alt rn, try again later.")
 
     # =========================================================
+    # Alt Whitelist (slash)
+    # =========================================================
+    @app_commands.command(name="alt_whitelist_add", description="Whitelist a user to use /alt without Manage Server.")
+    @app_commands.describe(user="User to whitelist")
+    async def alt_whitelist_add(self, interaction: discord.Interaction, user: discord.User):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
+            return
+        added = self._wl_add(interaction.guild.id, user.id)
+        msg = f"✅ {user.mention} whitelisted for /alt." if added else f"ℹ️ {user.mention} is already whitelisted."
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @app_commands.command(name="alt_whitelist_remove", description="Remove a user from the /alt whitelist.")
+    @app_commands.describe(user="User to remove")
+    async def alt_whitelist_remove(self, interaction: discord.Interaction, user: discord.User):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
+            return
+        removed = self._wl_remove(interaction.guild.id, user.id)
+        msg = f"✅ Removed {user.mention} from whitelist." if removed else f"ℹ️ {user.mention} wasn’t whitelisted."
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @app_commands.command(name="alt_whitelist_list", description="Show users whitelisted for /alt in this server.")
+    async def alt_whitelist_list(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
+            return
+        ids = list(self._wl_get(interaction.guild.id))
+        if not ids:
+            await interaction.response.send_message("No users are whitelisted.", ephemeral=True)
+            return
+        mentions = []
+        for uid in ids:
+            u = interaction.guild.get_member(uid) or await interaction.client.fetch_user(uid)
+            mentions.append(u.mention if u else f"<@{uid}>")
+        await interaction.response.send_message("Whitelisted: " + ", ".join(mentions), ephemeral=True)
+
+    # =========================================================
     # Bot modlist management (per-guild, persistent) – SLASH
     # =========================================================
-
     @app_commands.command(name="addmod", description="Add a role to this guild's bot-mod list (members with it can use the bot).")
     @app_commands.describe(role="Role to add")
     async def addmod(self, interaction: discord.Interaction, role: discord.Role):
@@ -330,7 +359,6 @@ class AdminCog(commands.Cog):
     # =========================================================
     # Bot modlist management – PREFIX
     # =========================================================
-
     @commands.command(name="addmod")
     @commands.has_permissions(administrator=True)
     async def p_addmod(self, ctx, role: discord.Role):
@@ -379,12 +407,11 @@ class AdminCog(commands.Cog):
         file4: Optional[discord.Attachment] = None,
         file5: Optional[discord.Attachment] = None,
     ):
-        """Say text + any attached images/files, restricted to specific roles."""
         if not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
 
-        # If you want /say to respect the persistent mod list instead, replace this block
+        # If you want /say to respect persistent mod list instead, swap this block
         has_role = any((role.id in self.allowed_say_roles) for role in interaction.user.roles)
         if not has_role:
             await interaction.response.send_message("❌ You don't have access to `/say`.", ephemeral=True)
@@ -409,7 +436,6 @@ class AdminCog(commands.Cog):
         self.logger.info(f"Say command used by {interaction.user} in {interaction.guild.name}")
 
         try:
-            # allow role/user mentions in the content (so <@&id> turns into a real ping)
             allowed = discord.AllowedMentions(everyone=False, users=True, roles=True)
             await target.send(content=content, files=files or None, allowed_mentions=allowed)
         except discord.Forbidden:
@@ -424,7 +450,7 @@ class AdminCog(commands.Cog):
                 await interaction.response.send_message(f"✅ Sent to {target.mention}", ephemeral=True)
             else:
                 await interaction.response.send_message("✅ Sent.", ephemeral=True)
-    
+
     # =========================
     # /announce
     # =========================
@@ -446,7 +472,7 @@ class AdminCog(commands.Cog):
         if not interaction.user.guild_permissions.manage_messages:
             await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
             return
-        
+
         target_channel = channel or interaction.channel
 
         embed = discord.Embed(description=message, color=discord.Color.green())
@@ -457,7 +483,7 @@ class AdminCog(commands.Cog):
             f"Announce command used by {interaction.user} in {interaction.guild.name} "
             f"(title={'yes' if title else 'no'}, ping_role={getattr(ping_role, 'id', None)})"
         )
-        
+
         try:
             content = ping_role.mention if ping_role else None
             allowed = discord.AllowedMentions(
@@ -475,7 +501,7 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message("❌ I don't have permission to send messages in that channel.", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"❌ Failed to send announcement: {e}", ephemeral=True)
-    
+
     @app_commands.command(name="clear", description="Clear messages from the channel")
     @app_commands.describe(
         amount="Number of messages to delete (1-100)",
@@ -485,17 +511,17 @@ class AdminCog(commands.Cog):
         if not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("❌ This command can only be used by server members.", ephemeral=True)
             return
-            
+
         if not interaction.user.guild_permissions.manage_messages:
             await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
             return
-        
+
         if amount < 1 or amount > 100:
             await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
             return
-        
+
         await interaction.response.defer(ephemeral=True)
-        
+
         try:
             if user:
                 def check(message):
@@ -507,24 +533,24 @@ class AdminCog(commands.Cog):
                 deleted = await interaction.channel.purge(limit=amount)
                 deleted_count = len(deleted)
                 await interaction.followup.send(f"✅ Deleted {deleted_count} messages", ephemeral=True)
-            
+
             self.logger.info(f"Clear command used by {interaction.user} - deleted {deleted_count} messages in {interaction.guild.name}")
-            
+
         except discord.Forbidden:
             await interaction.followup.send("❌ I don't have permission to delete messages.", ephemeral=True)
         except discord.HTTPException as e:
             await interaction.followup.send(f"❌ Failed to delete messages: {e}", ephemeral=True)
-    
+
     @app_commands.command(name="snipe", description="Show the last deleted message in this channel")
     async def snipe(self, interaction: discord.Interaction):
         channel_id = interaction.channel.id
-        
+
         if channel_id not in self.deleted_messages:
             await interaction.response.send_message("❌ No recently deleted messages found in this channel.", ephemeral=True)
             return
-        
+
         deleted_msg = self.deleted_messages[channel_id]
-        
+
         embed = discord.Embed(
             title="🎯 Sniped Message",
             description=deleted_msg['content'] or "*No content*",
@@ -536,22 +562,22 @@ class AdminCog(commands.Cog):
         )
         embed.add_field(name="Sent", value=format_dt(deleted_msg['created_at'], style="F"), inline=False)
         embed.set_footer(text="Message deleted")
-        
+
         await interaction.response.send_message(embed=embed)
-    
+
     @app_commands.command(name="setprefix", description="Change the bot's command prefix")
     @app_commands.describe(prefix="New prefix for the bot (max 5 characters)")
     async def setprefix(self, interaction: discord.Interaction, prefix: str):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ You need administrator permission to change the prefix.", ephemeral=True)
             return
-        
+
         if len(prefix) > 5:
             await interaction.response.send_message("❌ Prefix must be 5 characters or less.", ephemeral=True)
             return
-        
+
         self.bot.command_prefix = prefix
-        
+
         embed = discord.Embed(
             title="✅ Prefix Changed",
             description=f"Bot prefix has been changed to `{prefix}`",
@@ -559,21 +585,21 @@ class AdminCog(commands.Cog):
         )
         embed.add_field(name="Time", value=format_dt(utcnow(), style="F"), inline=False)
         embed.set_footer(text=f"Changed by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
-        
+
         self.logger.info(f"Prefix changed to '{prefix}' by {interaction.user} in {interaction.guild.name}")
         await interaction.response.send_message(embed=embed)
-    
+
     @app_commands.command(name="dm", description="Send a direct message to a user")
     @app_commands.describe(user="The user to send a DM to", message="The message to send")
     async def dm_user(self, interaction: discord.Interaction, user: discord.User, *, message: str):
         if not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
-            
+
         if not interaction.user.guild_permissions.manage_messages:
             await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
             return
-        
+
         try:
             await user.send(message)
             await interaction.response.send_message(f"✅ Direct message sent to {user.display_name}!", ephemeral=True)
@@ -583,63 +609,63 @@ class AdminCog(commands.Cog):
         except discord.HTTPException as e:
             await interaction.response.send_message(f"❌ Failed to send DM: {e}", ephemeral=True)
             self.logger.error(f"Failed to send DM to {user}: {e}")
-    
+
     @app_commands.command(name="setnick", description="Change a member's nickname")
     @app_commands.describe(member="The member to change nickname for", nickname="The new nickname (leave empty to remove nickname)")
     async def setnick(self, interaction: discord.Interaction, member: discord.Member, nickname: Optional[str] = None):
         if not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
-            
+
         if not interaction.user.guild_permissions.manage_nicknames:
             await interaction.response.send_message("❌ You don't have permission to manage nicknames.", ephemeral=True)
             return
-        
+
         if member.top_role >= interaction.guild.me.top_role and member != interaction.guild.me:
             await interaction.response.send_message("❌ I cannot change this member's nickname due to role hierarchy.", ephemeral=True)
             return
-        
+
         try:
             old_nick = member.display_name
             await member.edit(nick=nickname)
-            
+
             embed = discord.Embed(title="✅ Nickname Changed", color=discord.Color.green())
             embed.add_field(name="Member", value=member.mention, inline=True)
             embed.add_field(name="Old Nickname", value=old_nick, inline=True)
             embed.add_field(name="New Nickname", value=nickname or member.name, inline=True)
             embed.add_field(name="Time", value=format_dt(utcnow(), style="F"), inline=False)
             embed.set_footer(text=f"Changed by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
-            
+
             await interaction.response.send_message(embed=embed)
             self.logger.info(f"Nickname changed for {member} by {interaction.user}: {old_nick} -> {nickname or member.name}")
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to change this member's nickname.", ephemeral=True)
         except discord.HTTPException as e:
             await interaction.response.send_message(f"❌ Failed to change nickname: {e}", ephemeral=True)
-    
+
     @app_commands.command(name="addrole", description="Add a role to a member")
     @app_commands.describe(member="The member to add the role to", role="The role to add")
     async def addrole(self, interaction: discord.Interaction, member: discord.Member, role: discord.Role):
         if not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
-            
+
         if not interaction.user.guild_permissions.manage_roles:
             await interaction.response.send_message("❌ You don't have permission to manage roles.", ephemeral=True)
             return
-        
+
         if role >= interaction.user.top_role and interaction.user != interaction.guild.owner:
             await interaction.response.send_message("❌ You cannot assign a role that is higher than or equal to your highest role.", ephemeral=True)
             return
-        
+
         if role >= interaction.guild.me.top_role:
             await interaction.response.send_message("❌ I cannot assign this role due to role hierarchy.", ephemeral=True)
             return
-        
+
         if role in member.roles:
             await interaction.response.send_message(f"ℹ️ {member.display_name} already has the {role.name} role.", ephemeral=True)
             return
-        
+
         try:
             await member.add_roles(role)
             embed = discord.Embed(title="✅ Role Added", color=discord.Color.green())
@@ -653,44 +679,44 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message("❌ I don't have permission to add this role.", ephemeral=True)
         except discord.HTTPException as e:
             await interaction.response.send_message(f"❌ Failed to add role: {e}", ephemeral=True)
-    
+
     @app_commands.command(name="watchuser", description="Add a user to the watch list for monitoring")
     @app_commands.describe(user="The user to add to watch list", reason="Reason for watching this user")
     async def watchuser(self, interaction: discord.Interaction, user: discord.User, *, reason: str = "No reason provided"):
         if not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
-            
+
         if not interaction.user.guild_permissions.kick_members:
             await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
             return
-        
+
         if not hasattr(self, 'watch_list'):
             self.watch_list = {}
-        
+
         guild_id = interaction.guild.id
         if guild_id not in self.watch_list:
             self.watch_list[guild_id] = {}
-        
+
         self.watch_list[guild_id][user.id] = {
             'user': user,
             'reason': reason,
             'added_by': interaction.user,
             'added_at': utcnow()
         }
-        
+
         embed = discord.Embed(title="🕵️‍♂️ User Added to Watch List", color=discord.Color.orange())
         embed.add_field(name="User", value=f"{user.mention} ({user.name}#{user.discriminator})", inline=False)
         embed.add_field(name="Reason", value=reason, inline=False)
         embed.add_field(name="Time", value=format_dt(utcnow(), style="F"), inline=False)
         embed.set_footer(text=f"Added by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
         embed.set_thumbnail(url=user.display_avatar.url)
-        
+
         await interaction.response.send_message(embed=embed)
         self.logger.info(f"User {user} added to watch list by {interaction.user} - Reason: {reason}")
 
     # =========================
-    # Prefix command versions already present
+    # Prefix command versions
     # =========================
     @commands.command(name="say")
     async def prefix_say(self, ctx, *, message):
@@ -701,7 +727,7 @@ class AdminCog(commands.Cog):
             await ctx.send("❌ You don't have permission to use this command.", delete_after=5)
             return
         await ctx.send(message)
-    
+
     @commands.command(name="clear")
     async def prefix_clear(self, ctx, amount: int, member: Optional[discord.Member] = None):
         await self.delete_command_message(ctx)
@@ -724,7 +750,7 @@ class AdminCog(commands.Cog):
             await confirmation.delete(delay=3)
         except discord.Forbidden:
             await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
-    
+
     @commands.command(name="snipe")
     async def prefix_snipe(self, ctx):
         await self.delete_command_message(ctx)
@@ -744,7 +770,7 @@ class AdminCog(commands.Cog):
         )
         embed.add_field(name="Sent", value=format_dt(deleted_msg['created_at'], style="F"), inline=False)
         await ctx.send(embed=embed)
-    
+
     @commands.command(name="dm")
     async def prefix_dm(self, ctx, user: discord.User, *, message):
         await self.delete_command_message(ctx)
