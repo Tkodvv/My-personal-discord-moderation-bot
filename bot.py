@@ -26,7 +26,7 @@ from cogs.admin import AdminCog
 
 
 class DiscordBot(commands.Bot):
-    """Main Discord bot class with slash command support and per‑guild mod whitelist."""
+    """Main Discord bot class with slash command support and per-guild mod whitelist."""
 
     # ---------- persistence paths ----------
     DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -51,11 +51,16 @@ class DiscordBot(commands.Bot):
         self.logger = logging.getLogger(__name__)
 
         # health/uptime tracking
-        self.boot_time = utcnow()        # <-- added
-        self.last_sync_time = None       # <-- added
+        self.boot_time = utcnow()
+        self.last_sync_time = None
 
-        # Per‑guild whitelist storage: { "<guild_id>": [role_id, ...] }
+        # Per-guild whitelist storage: { "<guild_id>": [role_id, ...] }
         self.mod_whitelist: Dict[str, List[int]] = {}
+
+        # --- alt whitelist (per-guild, in-memory; used by /alt & !alt) ---
+        # {guild_id: {user_ids}}, {guild_id: {role_ids}}
+        self.alt_whitelist_users: Dict[int, Set[int]] = {}
+        self.alt_whitelist_roles: Dict[int, Set[int]] = {}
 
         # Ensure data dir exists and load file now
         os.makedirs(self.DATA_DIR, exist_ok=True)
@@ -126,6 +131,28 @@ class DiscordBot(commands.Bot):
             self.save_mod_whitelist()
         return removed
 
+    # ---------- ALT whitelist helpers ----------
+    def is_alt_whitelisted(self, member: discord.Member) -> bool:
+        """True if member is explicitly whitelisted for /alt via user or role."""
+        if not isinstance(member, discord.Member):
+            return False
+        gu = self.alt_whitelist_users.get(member.guild.id, set())
+        gr = self.alt_whitelist_roles.get(member.guild.id, set())
+        if member.id in gu:
+            return True
+        role_ids = {r.id for r in getattr(member, "roles", [])}
+        return bool(role_ids & gr)
+
+    def allow_alt(self, member: discord.Member) -> bool:
+        """Staff or explicitly whitelisted can use /alt."""
+        if not isinstance(member, discord.Member):
+            return False
+        return (
+            member.guild_permissions.administrator
+            or member.guild_permissions.manage_guild
+            or self.is_alt_whitelisted(member)
+        )
+
     # ---------- global allow checks ----------
     def _member_has_allowed_role(self, member: discord.Member) -> bool:
         """True if member is admin or has a role in this guild's whitelist (or fallback)."""
@@ -143,6 +170,13 @@ class DiscordBot(commands.Bot):
         """
         if ctx.guild is None:
             raise commands.CheckFailure("❌ Commands can only be used in a server.")
+
+        # allow whitelisted users to use !alt even if they aren't in mod roles
+        if ctx.command and ctx.command.name.lower() == "alt":
+            author = ctx.author if isinstance(ctx.author, discord.Member) else None
+            if author and self.allow_alt(author):
+                return True
+
         author = ctx.author
         if not isinstance(author, discord.Member) or not self._member_has_allowed_role(author):
             raise commands.CheckFailure("❌ You don’t have access to use bot commands here.")
@@ -168,6 +202,21 @@ class DiscordBot(commands.Bot):
                 finally:
                     return False
 
+            # --- special case: /alt — allow if the member is whitelisted for alt ---
+            cmd_name = ""
+            try:
+                if interaction.command:
+                    cmd_name = (interaction.command.qualified_name or interaction.command.name or "").lower()
+            except Exception:
+                pass
+
+            if cmd_name.split(" ")[0] == "alt":
+                member = interaction.user if isinstance(interaction.user, discord.Member) \
+                         else interaction.guild.get_member(interaction.user.id)
+                if member and self.allow_alt(member):
+                    return True  # ✅ bypass gate for /alt
+
+            # --- normal global gate for everything else ---
             user = interaction.user
             if isinstance(user, discord.Member):
                 if user.guild_permissions.administrator:
@@ -191,7 +240,7 @@ class DiscordBot(commands.Bot):
         # Sync slash commands
         try:
             synced = await self.tree.sync()
-            self.last_sync_time = utcnow()  # <-- added
+            self.last_sync_time = utcnow()
             self.logger.info("Synced %d slash commands", len(synced))
         except Exception as e:
             self.logger.error(f"Failed to sync slash commands: {e}")
