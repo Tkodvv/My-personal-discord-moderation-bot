@@ -229,7 +229,8 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
             return
         self.bot.add_alt_user(interaction.guild.id, user.id)
-        await interaction.response.send_message(f"✅ {user.mention} whitelisted for /alt.", ephemeral=True)
+        # PUBLIC message (removed ephemeral=True)
+        await interaction.response.send_message(f"✅ {user.mention} whitelisted for /alt.")
 
     @app_commands.command(name="alt_whitelist_remove", description="Remove a user from the /alt whitelist.")
     @app_commands.describe(user="User to remove")
@@ -239,7 +240,8 @@ class AdminCog(commands.Cog):
             return
         removed = self.bot.remove_alt_user(interaction.guild.id, user.id)
         msg = f"✅ Removed {user.mention} from whitelist." if removed else f"ℹ️ {user.mention} wasn’t whitelisted."
-        await interaction.response.send_message(msg, ephemeral=True)
+        # PUBLIC message (removed ephemeral=True)
+        await interaction.response.send_message(msg)
 
     @app_commands.command(name="alt_whitelist_list", description="Show users whitelisted for /alt in this server.")
     async def alt_whitelist_list(self, interaction: discord.Interaction):
@@ -248,13 +250,15 @@ class AdminCog(commands.Cog):
             return
         ids = sorted(self.bot.get_alt_users(interaction.guild.id))
         if not ids:
-            await interaction.response.send_message("No users are whitelisted.", ephemeral=True)
+            # PUBLIC message (removed ephemeral=True)
+            await interaction.response.send_message("No users are whitelisted.")
             return
         mentions = []
         for uid in ids:
             u = interaction.guild.get_member(uid) or await interaction.client.fetch_user(uid)
             mentions.append(u.mention if u else f"<@{uid}>")
-        await interaction.response.send_message("Whitelisted: " + ", ".join(mentions), ephemeral=True)
+        # PUBLIC message (removed ephemeral=True)
+        await interaction.response.send_message("Whitelisted: " + ", ".join(mentions))
 
     # =========================================================
     # Bot modlist management (per-guild, persistent) – SLASH
