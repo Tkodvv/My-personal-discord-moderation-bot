@@ -31,6 +31,7 @@ class DiscordBot(commands.Bot):
     # ---------- persistence paths ----------
     DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
     MOD_FILE = os.path.join(DATA_DIR, "mod_whitelist.json")
+    ALT_FILE = os.path.join(DATA_DIR, "alt_whitelist.json")  # <--- NEW
 
     def __init__(self):
         """Initialize the bot with necessary intents and settings."""
@@ -57,14 +58,15 @@ class DiscordBot(commands.Bot):
         # Per-guild whitelist storage: { "<guild_id>": [role_id, ...] }
         self.mod_whitelist: Dict[str, List[int]] = {}
 
-        # --- alt whitelist (per-guild, in-memory; used by /alt & !alt) ---
+        # --- alt whitelist (per-guild, persisted) ---
         # {guild_id: {user_ids}}, {guild_id: {role_ids}}
         self.alt_whitelist_users: Dict[int, Set[int]] = {}
         self.alt_whitelist_roles: Dict[int, Set[int]] = {}
 
-        # Ensure data dir exists and load file now
+        # Ensure data dir exists and load files now
         os.makedirs(self.DATA_DIR, exist_ok=True)
         self.load_mod_whitelist()
+        self.load_alt_whitelist()  # <--- NEW
 
     # ---------- whitelist persistence helpers ----------
     def load_mod_whitelist(self) -> None:
@@ -96,42 +98,82 @@ class DiscordBot(commands.Bot):
         except Exception as e:
             self.logger.error("Failed to save mod whitelist: %s", e)
 
-    # ---------- whitelist query/mutation APIs (used by cogs) ----------
-    def get_guild_mod_role_ids(self, guild_id: int) -> Set[int]:
-        """
-        Return the set of mod role IDs for a guild.
-        If none stored for this guild, fallback to ALLOWED_ROLE_IDS.
-        """
-        roles = self.mod_whitelist.get(str(guild_id))
-        if roles:
-            return set(int(r) for r in roles)
-        return set(ALLOWED_ROLE_IDS)
+    # ---------- ALT whitelist persistence (NEW) ----------
+    def load_alt_whitelist(self) -> None:
+        """Load alt whitelist mapping from disk."""
+        try:
+            if not os.path.exists(self.ALT_FILE):
+                self.alt_whitelist_users = {}
+                self.alt_whitelist_roles = {}
+                self.save_alt_whitelist()
+                self.logger.info("Created empty alt whitelist at %s", self.ALT_FILE)
+                return
 
-    def add_guild_mod_role(self, guild_id: int, role_id: int) -> None:
-        """Add a role to the guild's whitelist and persist."""
-        key = str(guild_id)
-        if key not in self.mod_whitelist:
-            self.mod_whitelist[key] = []
-        if int(role_id) not in self.mod_whitelist[key]:
-            self.mod_whitelist[key].append(int(role_id))
-            self.save_mod_whitelist()
+            with open(self.ALT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
 
-    def remove_guild_mod_role(self, guild_id: int, role_id: int) -> bool:
-        """Remove a role from the guild's whitelist and persist. Returns True if removed."""
-        key = str(guild_id)
-        if key not in self.mod_whitelist:
-            return False
-        before = len(self.mod_whitelist[key])
-        self.mod_whitelist[key] = [int(r) for r in self.mod_whitelist[key] if int(r) != int(role_id)]
-        removed = len(self.mod_whitelist[key]) != before
-        # Clean up empty lists to keep file neat
-        if not self.mod_whitelist[key]:
-            del self.mod_whitelist[key]
-        if removed:
-            self.save_mod_whitelist()
-        return removed
+            users_map: Dict[int, Set[int]] = {}
+            roles_map: Dict[int, Set[int]] = {}
+            for gid_str, payload in data.items():
+                gid = int(gid_str)
+                users = set(int(u) for u in payload.get("users", []))
+                roles = set(int(r) for r in payload.get("roles", []))
+                users_map[gid] = users
+                roles_map[gid] = roles
 
-    # ---------- ALT whitelist helpers ----------
+            self.alt_whitelist_users = users_map
+            self.alt_whitelist_roles = roles_map
+            self.logger.info("Loaded alt whitelist for %d guild(s)", len(users_map))
+        except Exception as e:
+            self.logger.error("Failed to load alt whitelist: %s", e)
+            self.alt_whitelist_users = {}
+            self.alt_whitelist_roles = {}
+
+    def save_alt_whitelist(self) -> None:
+        """Persist alt whitelist to disk."""
+        try:
+            out: Dict[str, Dict[str, List[int]]] = {}
+            all_guilds = set(self.alt_whitelist_users) | set(self.alt_whitelist_roles)
+            for gid in all_guilds:
+                out[str(gid)] = {
+                    "users": sorted(self.alt_whitelist_users.get(gid, set())),
+                    "roles": sorted(self.alt_whitelist_roles.get(gid, set())),
+                }
+            with open(self.ALT_FILE, "w", encoding="utf-8") as f:
+                json.dump(out, f, indent=2)
+        except Exception as e:
+            self.logger.error("Failed to save alt whitelist: %s", e)
+
+    # ---------- ALT whitelist query/mutation APIs (NEW) ----------
+    def get_alt_users(self, guild_id: int) -> Set[int]:
+        return set(self.alt_whitelist_users.get(guild_id, set()))
+
+    def get_alt_roles(self, guild_id: int) -> Set[int]:
+        return set(self.alt_whitelist_roles.get(guild_id, set()))
+
+    def add_alt_user(self, guild_id: int, user_id: int) -> None:
+        self.alt_whitelist_users.setdefault(guild_id, set()).add(int(user_id))
+        self.save_alt_whitelist()
+
+    def remove_alt_user(self, guild_id: int, user_id: int) -> bool:
+        s = self.alt_whitelist_users.setdefault(guild_id, set())
+        existed = int(user_id) in s
+        s.discard(int(user_id))
+        self.save_alt_whitelist()
+        return existed
+
+    def add_alt_role(self, guild_id: int, role_id: int) -> None:
+        self.alt_whitelist_roles.setdefault(guild_id, set()).add(int(role_id))
+        self.save_alt_whitelist()
+
+    def remove_alt_role(self, guild_id: int, role_id: int) -> bool:
+        s = self.alt_whitelist_roles.setdefault(guild_id, set())
+        existed = int(role_id) in s
+        s.discard(int(role_id))
+        self.save_alt_whitelist()
+        return existed
+
+    # ---------- ALT whitelist helpers (existing logic uses these) ----------
     def is_alt_whitelisted(self, member: discord.Member) -> bool:
         """True if member is explicitly whitelisted for /alt via user or role."""
         if not isinstance(member, discord.Member):
