@@ -68,7 +68,7 @@ class DiscordBot(commands.Bot):
         self.load_mod_whitelist()
         self.load_alt_whitelist()  # <--- NEW
 
-    # ---------- whitelist persistence helpers ----------
+    # ---------- mod whitelist persistence helpers ----------
     def load_mod_whitelist(self) -> None:
         """Load mod whitelist JSON from disk (creates empty file if missing)."""
         try:
@@ -97,6 +97,39 @@ class DiscordBot(commands.Bot):
                 json.dump(self.mod_whitelist, f, indent=2)
         except Exception as e:
             self.logger.error("Failed to save mod whitelist: %s", e)
+
+    # ---------- mod whitelist query/mutation APIs (restored) ----------
+    def get_guild_mod_role_ids(self, guild_id: int) -> Set[int]:
+        """
+        Return the set of mod role IDs for a guild.
+        If none stored for this guild, fallback to ALLOWED_ROLE_IDS.
+        """
+        roles = self.mod_whitelist.get(str(guild_id))
+        if roles:
+            return set(int(r) for r in roles)
+        return set(ALLOWED_ROLE_IDS)
+
+    def add_guild_mod_role(self, guild_id: int, role_id: int) -> None:
+        """Add a role to the guild's whitelist and persist."""
+        key = str(guild_id)
+        self.mod_whitelist.setdefault(key, [])
+        if int(role_id) not in self.mod_whitelist[key]:
+            self.mod_whitelist[key].append(int(role_id))
+            self.save_mod_whitelist()
+
+    def remove_guild_mod_role(self, guild_id: int, role_id: int) -> bool:
+        """Remove a role from the guild's whitelist and persist. Returns True if removed."""
+        key = str(guild_id)
+        if key not in self.mod_whitelist:
+            return False
+        before = len(self.mod_whitelist[key])
+        self.mod_whitelist[key] = [int(r) for r in self.mod_whitelist[key] if int(r) != int(role_id)]
+        removed = len(self.mod_whitelist[key]) != before
+        if not self.mod_whitelist[key]:
+            del self.mod_whitelist[key]
+        if removed:
+            self.save_mod_whitelist()
+        return removed
 
     # ---------- ALT whitelist persistence (NEW) ----------
     def load_alt_whitelist(self) -> None:
@@ -173,7 +206,7 @@ class DiscordBot(commands.Bot):
         self.save_alt_whitelist()
         return existed
 
-    # ---------- ALT whitelist helpers (existing logic uses these) ----------
+    # ---------- ALT whitelist helpers ----------
     def is_alt_whitelisted(self, member: discord.Member) -> bool:
         """True if member is explicitly whitelisted for /alt via user or role."""
         if not isinstance(member, discord.Member):
@@ -214,7 +247,7 @@ class DiscordBot(commands.Bot):
             raise commands.CheckFailure("❌ Commands can only be used in a server.")
 
         # allow whitelisted users to use !alt even if they aren't in mod roles
-        if ctx.command and ctx.command.name.lower() == "alt":
+        if ctx.command and ctx.command.name and ctx.command.name.lower() == "alt":
             author = ctx.author if isinstance(ctx.author, discord.Member) else None
             if author and self.allow_alt(author):
                 return True
@@ -244,7 +277,7 @@ class DiscordBot(commands.Bot):
                 finally:
                     return False
 
-            # --- special case: /alt — allow if the member is whitelisted for alt ---
+            # --- special case: /alt — allow if the member is whitelisted for alt; else say why ---
             cmd_name = ""
             try:
                 if interaction.command:
@@ -257,6 +290,18 @@ class DiscordBot(commands.Bot):
                          else interaction.guild.get_member(interaction.user.id)
                 if member and self.allow_alt(member):
                     return True  # ✅ bypass gate for /alt
+                # explicit fallback message for /alt
+                try:
+                    await interaction.response.send_message(
+                        "❌ You’re not whitelisted to use `/alt` here. Ask a staff member to add you.",
+                        ephemeral=True
+                    )
+                except discord.InteractionResponded:
+                    await interaction.followup.send(
+                        "❌ You’re not whitelisted to use `/alt` here. Ask a staff member to add you.",
+                        ephemeral=True
+                    )
+                return False
 
             # --- normal global gate for everything else ---
             user = interaction.user
