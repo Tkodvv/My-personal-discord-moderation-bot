@@ -12,7 +12,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from datetime import datetime
-from typing import Optional, Dict, Set
+from typing import Optional, Dict
 from discord.utils import utcnow, format_dt
 
 log = logging.getLogger(__name__)
@@ -83,30 +83,6 @@ class AdminCog(commands.Cog):
             1379755293797384202,
         }
 
-        # in-memory whitelist per guild for /alt (persist to DB if you want later)
-        self._alt_whitelists: Dict[int, Set[int]] = {}
-
-    # ---------- whitelist helpers ----------
-    def _wl_get(self, guild_id: int) -> Set[int]:
-        wl = self._alt_whitelists.get(guild_id)
-        if wl is None:
-            wl = set()
-            self._alt_whitelists[guild_id] = wl
-        return wl
-
-    def _wl_add(self, guild_id: int, user_id: int) -> bool:
-        wl = self._wl_get(guild_id)
-        before = len(wl)
-        wl.add(int(user_id))
-        return len(wl) > before
-
-    def _wl_remove(self, guild_id: int, user_id: int) -> bool:
-        wl = self._wl_get(guild_id)
-        if int(user_id) in wl:
-            wl.remove(int(user_id))
-            return True
-        return False
-
     async def delete_command_message(self, ctx):
         try:
             await ctx.message.delete()
@@ -136,22 +112,31 @@ class AdminCog(commands.Cog):
         show_pw = os.getenv("ALT_SHOW_PASSWORD", "true").lower() in {"1","true","yes","y"}
         is_slash = getattr(ctx, "interaction", None) is not None
 
+        async def _slash_reply(msg: str):
+            """Safe ephemeral reply for slash branch."""
+            if not is_slash:
+                return
+            try:
+                if not ctx.interaction.response.is_done():
+                    await ctx.interaction.response.send_message(msg, ephemeral=True)
+                else:
+                    await ctx.interaction.followup.send(msg, ephemeral=True)
+            except Exception:
+                pass
+
         if not enabled:
             if is_slash:
-                await ctx.reply("alts feature is disabled.", ephemeral=True)
+                await _slash_reply("alts feature is disabled.")
             else:
                 await ctx.send("alts feature is disabled.")
             return
 
         member = ctx.author if isinstance(ctx.author, discord.Member) else None
-        is_admin = bool(member and member.guild_permissions.manage_guild)
-        is_whitelisted = bool(member and member.guild and member.id in self._wl_get(member.guild.id))
-        if not (is_admin or is_whitelisted):
-            msg = "❌ You’re not allowed to use `/alt` in this server."
+        if not (member and self.bot.allow_alt(member)):
             if is_slash:
-                await ctx.reply(msg, ephemeral=True)
+                await _slash_reply("❌ You’re not allowed to use `/alt` in this server.")
             else:
-                await ctx.send(msg, delete_after=5)
+                await ctx.send("❌ You’re not allowed to use `!alt` in this server.", delete_after=5)
             return
 
         if is_slash:
@@ -234,18 +219,18 @@ class AdminCog(commands.Cog):
         except commands.CommandOnCooldown as e:
             msg = f"slow down — try again in {e.retry_after:.1f}s"
             if is_slash:
-                await ctx.reply(msg, ephemeral=True)
+                await _slash_reply(msg)
             else:
                 await ctx.send(msg)
         except Exception as e:
             self.logger.error("alt command failed: %s", e)
             if is_slash:
-                await ctx.reply("couldn't fetch a random alt rn, try again later.", ephemeral=True)
+                await _slash_reply("couldn't fetch a random alt rn, try again later.")
             else:
                 await ctx.send("couldn't fetch a random alt rn, try again later.")
 
     # =========================================================
-    # Alt Whitelist (slash)
+    # Alt Whitelist (slash) — uses bot's PERSISTENT storage
     # =========================================================
     @app_commands.command(name="alt_whitelist_add", description="Whitelist a user to use /alt without Manage Server.")
     @app_commands.describe(user="User to whitelist")
@@ -253,9 +238,8 @@ class AdminCog(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
             return
-        added = self._wl_add(interaction.guild.id, user.id)
-        msg = f"✅ {user.mention} whitelisted for /alt." if added else f"ℹ️ {user.mention} is already whitelisted."
-        await interaction.response.send_message(msg, ephemeral=True)
+        self.bot.add_alt_user(interaction.guild.id, user.id)
+        await interaction.response.send_message(f"✅ {user.mention} whitelisted for /alt.", ephemeral=True)
 
     @app_commands.command(name="alt_whitelist_remove", description="Remove a user from the /alt whitelist.")
     @app_commands.describe(user="User to remove")
@@ -263,7 +247,7 @@ class AdminCog(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
             return
-        removed = self._wl_remove(interaction.guild.id, user.id)
+        removed = self.bot.remove_alt_user(interaction.guild.id, user.id)
         msg = f"✅ Removed {user.mention} from whitelist." if removed else f"ℹ️ {user.mention} wasn’t whitelisted."
         await interaction.response.send_message(msg, ephemeral=True)
 
@@ -272,7 +256,7 @@ class AdminCog(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
             return
-        ids = list(self._wl_get(interaction.guild.id))
+        ids = sorted(self.bot.get_alt_users(interaction.guild.id))
         if not ids:
             await interaction.response.send_message("No users are whitelisted.", ephemeral=True)
             return
@@ -411,7 +395,6 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
 
-        # If you want /say to respect persistent mod list instead, swap this block
         has_role = any((role.id in self.allowed_say_roles) for role in interaction.user.roles)
         if not has_role:
             await interaction.response.send_message("❌ You don't have access to `/say`.", ephemeral=True)
