@@ -390,7 +390,7 @@ class AdminCog(commands.Cog):
     # =========================================================
     @app_commands.command(name="force_leave", description="(Owner only) Make the bot leave a server.")
     @app_commands.describe(guild_id="Guild ID to leave (default: the current server)")
-    @app_commands.checks.guild_only()
+    @app_commands.guild_only()
     async def force_leave(self, interaction: discord.Interaction, guild_id: Optional[str] = None):
         # Restrict to app owner
         try:
@@ -445,7 +445,7 @@ class AdminCog(commands.Cog):
     # Owner-only: Sync slash commands (slash + prefix)
     # =========================================================
     @app_commands.command(name="sync_commands", description="(Owner only) Sync slash commands now.")
-    @app_commands.checks.guild_only()
+    @app_commands.guild_only()
     async def sync_commands(self, interaction: discord.Interaction):
         try:
             is_owner = await self.bot.is_owner(interaction.user)
