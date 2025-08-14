@@ -198,6 +198,19 @@ class AdminCog(commands.Cog):
     # BLACKLIST: Global checks (slash & prefix)
     # =========================================================
     async def _interaction_not_blacklisted(self, interaction: discord.Interaction) -> bool:
+        # Block slash commands in DMs (extra safety on top of @app_commands.guild_only())
+        if interaction.guild is None:
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        "❌ Slash commands can only be used in a server.",
+                        ephemeral=True
+                    )
+            except Exception:
+                pass
+            return False
+
+        # Block in blacklisted guilds
         gid = getattr(interaction.guild, "id", None)
         if gid and gid in self.guild_blacklist:
             try:
@@ -209,11 +222,15 @@ class AdminCog(commands.Cog):
             except Exception:
                 pass
             return False
+
         return True
 
     async def _prefix_not_blacklisted(self, ctx: commands.Context) -> bool:
         gid = getattr(ctx.guild, "id", None)
-        return not gid or gid not in self.guild_blacklist
+        if gid and gid in self.guild_blacklist:
+            await ctx.send("❌ This bot is not available in this server.", delete_after=8)
+            return False
+        return True
 
     @commands.Cog.listener()
     async def on_message_delete(self, message):
@@ -1113,7 +1130,7 @@ async def setup(bot):
     await bot.add_cog(cog)
 
     # Global blacklist checks (apply once here):
-    # - Slash commands: block in blacklisted guilds
+    # - Slash commands: block in blacklisted guilds and in DMs
     # - Prefix commands: block in blacklisted guilds
     try:
         bot.tree.add_check(cog._interaction_not_blacklisted)
