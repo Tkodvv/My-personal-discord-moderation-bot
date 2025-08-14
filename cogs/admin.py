@@ -132,6 +132,13 @@ class AdminCog(commands.Cog):
         allowed_roles = self._get_alt_role_ids(member.guild.id)
         return any((r.id in allowed_roles) for r in member.roles)
 
+    # (Optional) tiny helper to fetch guild by id
+    def _g(self, gid: int) -> Optional[discord.Guild]:
+        try:
+            return self.bot.get_guild(int(gid))
+        except Exception:
+            return None
+
     async def delete_command_message(self, ctx):
         try:
             await ctx.message.delete()
@@ -363,6 +370,61 @@ class AdminCog(commands.Cog):
             mentions.append(r.mention if r else f"<@&{rid}>")
         await interaction.response.send_message(
             "Role-whitelisted for /alt: " + ", ".join(mentions),
+            allowed_mentions=self.no_pings
+        )
+
+    # =========================================================
+    # Owner-only: Force the bot to leave a server
+    # =========================================================
+    @app_commands.command(name="force_leave", description="(Owner only) Make the bot leave a server.")
+    @app_commands.describe(guild_id="Guild ID to leave (default: the current server)")
+    async def force_leave(self, interaction: discord.Interaction, guild_id: Optional[str] = None):
+        # Restrict to app owner
+        try:
+            is_owner = await self.bot.is_owner(interaction.user)
+        except Exception:
+            is_owner = False
+
+        if not is_owner:
+            await interaction.response.send_message("❌ Only the bot owner can use this.", ephemeral=True)
+            return
+
+        # Determine target guild
+        target: Optional[discord.Guild] = None
+        if guild_id:
+            try:
+                target = self.bot.get_guild(int(guild_id))
+            except Exception:
+                target = None
+            if not target:
+                await interaction.response.send_message("❌ I’m not in that server (or the Guild ID is invalid).", ephemeral=True)
+                return
+        else:
+            target = interaction.guild
+            if not target:
+                await interaction.response.send_message("❌ No guild context; provide a Guild ID.", ephemeral=True)
+                return
+
+        name, gid = target.name, target.id
+        await interaction.response.send_message(
+            f"⚠️ Leaving **{name}** (`{gid}`).",
+            ephemeral=True,
+            allowed_mentions=self.no_pings
+        )
+
+        try:
+            await target.leave()
+            self.logger.warning(f"Force-leave executed by {interaction.user} for guild {name} ({gid})")
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to leave that server (unexpected).", ephemeral=True)
+            return
+        except Exception as e:
+            await interaction.followup.send(f"❌ Failed to leave: {e}", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            f"👋 Left **{name}** (`{gid}`).",
+            ephemeral=True,
             allowed_mentions=self.no_pings
         )
 
@@ -878,6 +940,34 @@ class AdminCog(commands.Cog):
         except discord.HTTPException as e:
             await ctx.send(f"❌ Failed to send DM: {e}", delete_after=5)
             self.logger.error(f"Failed to send DM to {user}: {e}")
+
+    @commands.command(name="forceleave")
+    @commands.is_owner()
+    async def prefix_forceleave(self, ctx: commands.Context, guild_id: Optional[int] = None):
+        await self.delete_command_message(ctx)
+        target: Optional[discord.Guild] = None
+        if guild_id:
+            target = self.bot.get_guild(int(guild_id))
+            if not target:
+                await ctx.send("❌ I’m not in that server (or bad Guild ID).", delete_after=6)
+                return
+        else:
+            if not ctx.guild:
+                await ctx.send("❌ No guild context; provide a Guild ID.", delete_after=6)
+                return
+            target = ctx.guild
+
+        name, gid = target.name, target.id
+        try:
+            await target.leave()
+            self.logger.warning(f"Force-leave (prefix) by {ctx.author} for guild {name} ({gid})")
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to leave that server (unexpected).", delete_after=6)
+            return
+        except Exception as e:
+            await ctx.send(f"❌ Failed to leave: {e}", delete_after=8)
+            return
+        # No further confirmation (we just left)
 
 async def setup(bot):
     """Setup function for the cog."""
