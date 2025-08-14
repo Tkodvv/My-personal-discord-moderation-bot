@@ -83,12 +83,18 @@ class AdminCog(commands.Cog):
             1379755293797384202,
         }
 
-        # global "no ping" policy you can reuse in sends
+        # >>> global "no ping" policy you can reuse in sends <<<
         self.no_pings = discord.AllowedMentions.none()
 
-    # ===== ALT role whitelist helpers =====
+    # ===== ALT role whitelist helpers (prefer bot persistence, fallback to memory) =====
     def _get_alt_role_ids(self, guild_id: int) -> set[int]:
-        # store on the bot so it survives cog reloads; swap to your own persistence if you have it
+        # Prefer your bot's persistent method if present
+        if hasattr(self.bot, "get_alt_role_ids"):
+            try:
+                return set(self.bot.get_alt_role_ids(guild_id) or [])
+            except Exception:
+                pass
+        # Fallback to in-memory store on the bot
         store = getattr(self.bot, "_alt_role_whitelist", None)
         if store is None:
             store = {}
@@ -96,14 +102,24 @@ class AdminCog(commands.Cog):
         return set(store.get(guild_id, set()))
 
     def _add_alt_role(self, guild_id: int, role_id: int) -> None:
+        if hasattr(self.bot, "add_alt_role"):
+            try:
+                self.bot.add_alt_role(guild_id, role_id)
+                return
+            except Exception:
+                pass
         store = getattr(self.bot, "_alt_role_whitelist", None)
         if store is None:
             store = {}
             setattr(self.bot, "_alt_role_whitelist", store)
-        s = store.setdefault(guild_id, set())
-        s.add(role_id)
+        store.setdefault(guild_id, set()).add(role_id)
 
     def _remove_alt_role(self, guild_id: int, role_id: int) -> bool:
+        if hasattr(self.bot, "remove_alt_role"):
+            try:
+                return bool(self.bot.remove_alt_role(guild_id, role_id))
+            except Exception:
+                pass
         store = getattr(self.bot, "_alt_role_whitelist", None)
         if not store or guild_id not in store:
             return False
@@ -161,8 +177,7 @@ class AdminCog(commands.Cog):
             return await _slash_reply("alts feature is disabled.") if is_slash else await ctx.send("alts feature is disabled.")
 
         member = ctx.author if isinstance(ctx.author, discord.Member) else None
-
-        # >>> CHANGED: allow either user-whitelisted OR role-whitelisted
+        # >>> allow either user-whitelisted OR role-whitelisted <<<
         if not (member and (self.bot.allow_alt(member) or self._member_has_alt_role(member))):
             return await _slash_reply("❌ You’re not allowed to use `/alt` in this server.", ephemeral=True) \
                    if is_slash else await ctx.send("❌ You’re not allowed to use `!alt` in this server.", delete_after=5)
@@ -326,11 +341,8 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
             return
         removed = self._remove_alt_role(interaction.guild.id, role.id)
-        msg = (
-            f"✅ Removed {role.mention} from whitelist."
-            if removed else
-            f"ℹ️ {role.mention} wasn’t whitelisted."
-        )
+        msg = (f"✅ Removed {role.mention} from whitelist."
+               if removed else f"ℹ️ {role.mention} wasn’t whitelisted.")
         await interaction.response.send_message(msg, allowed_mentions=self.no_pings)
 
     @app_commands.command(
