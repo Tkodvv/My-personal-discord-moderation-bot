@@ -68,6 +68,20 @@ async def get_alt_public():
         "meta": meta,
     }
 
+# ---------------------------
+# Env-driven guild blacklist helper
+# ---------------------------
+def _parse_guild_blacklist_from_env() -> set[int]:
+    raw = os.getenv("GUILD_BLACKLIST", "") or ""
+    parts = [p.strip() for p in raw.replace(",", " ").split() if p.strip()]
+    ids: set[int] = set()
+    for p in parts:
+        try:
+            ids.add(int(p))
+        except ValueError:
+            pass
+    return ids
+
 class AdminCog(commands.Cog):
     """Administrative commands cog."""
 
@@ -83,20 +97,11 @@ class AdminCog(commands.Cog):
             1379755293797384202,
         }
 
-        # >>> global "no ping" policy you can reuse in sends <<<
+        # Global "no ping" policy for safe responses
         self.no_pings = discord.AllowedMentions.none()
 
-    # ---- Auto-sync slash commands on ready (once) ----
-    @commands.Cog.listener()
-    async def on_ready(self):
-        if getattr(self.bot, "_did_tree_sync", False):
-            return
-        try:
-            await self.bot.tree.sync()  # global sync
-            self.bot._did_tree_sync = True
-            self.logger.info("App commands globally synced.")
-        except Exception as e:
-            self.logger.error(f"Failed to sync app commands: {e}")
+        # Env-driven blacklist
+        self.guild_blacklist: set[int] = _parse_guild_blacklist_from_env()
 
     # ===== ALT role whitelist helpers (prefer bot persistence, fallback to memory) =====
     def _get_alt_role_ids(self, guild_id: int) -> set[int]:
@@ -157,6 +162,59 @@ class AdminCog(commands.Cog):
         except (discord.NotFound, discord.Forbidden):
             pass
 
+    # =========================================================
+    # BLACKLIST: Auto-leave on join + sweep at startup
+    # =========================================================
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild):
+        if guild.id in self.guild_blacklist:
+            try:
+                await guild.leave()
+                self.logger.info(f"Left blacklisted guild on join: {guild.name} ({guild.id})")
+            except Exception as e:
+                self.logger.error(f"Failed to leave blacklisted guild on join {guild.id}: {e}")
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # Sweep any already-joined blacklisted guilds
+        for g in list(self.bot.guilds):
+            if g.id in self.guild_blacklist:
+                try:
+                    await g.leave()
+                    self.logger.info(f"Left blacklisted guild on_ready: {g.name} ({g.id})")
+                except Exception as e:
+                    self.logger.error(f"Failed to leave blacklisted guild on_ready {g.id}: {e}")
+
+        # (Optional) first-run slash sync; harmless if you already sync elsewhere
+        if not getattr(self.bot, "_did_tree_sync", False):
+            try:
+                await self.bot.tree.sync()
+                self.bot._did_tree_sync = True
+                self.logger.info("App commands globally synced.")
+            except Exception as e:
+                self.logger.error(f"Failed to sync app commands: {e}")
+
+    # =========================================================
+    # BLACKLIST: Global checks (slash & prefix)
+    # =========================================================
+    async def _interaction_not_blacklisted(self, interaction: discord.Interaction) -> bool:
+        gid = getattr(interaction.guild, "id", None)
+        if gid and gid in self.guild_blacklist:
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        "❌ This bot is not available in this server.",
+                        ephemeral=True
+                    )
+            except Exception:
+                pass
+            return False
+        return True
+
+    async def _prefix_not_blacklisted(self, ctx: commands.Context) -> bool:
+        gid = getattr(ctx.guild, "id", None)
+        return not gid or gid not in self.guild_blacklist
+
     @commands.Cog.listener()
     async def on_message_delete(self, message):
         if message.author.bot:
@@ -196,7 +254,7 @@ class AdminCog(commands.Cog):
             return await _slash_reply("alts feature is disabled.") if is_slash else await ctx.send("alts feature is disabled.")
 
         member = ctx.author if isinstance(ctx.author, discord.Member) else None
-        # >>> allow either user-whitelisted OR role-whitelisted <<<
+        # allow either user-whitelisted OR role-whitelisted
         if not (member and (self.bot.allow_alt(member) or self._member_has_alt_role(member))):
             return await _slash_reply("❌ You’re not allowed to use `/alt` in this server.", ephemeral=True) \
                    if is_slash else await ctx.send("❌ You’re not allowed to use `!alt` in this server.", delete_after=5)
@@ -204,7 +262,7 @@ class AdminCog(commands.Cog):
         # For slash: defer NON-ephemeral so the final success message can be public
         if is_slash:
             try:
-                await ctx.interaction.response.defer()  # <- not ephemeral
+                await ctx.interaction.response.defer()  # not ephemeral
             except Exception:
                 pass
 
@@ -269,7 +327,7 @@ class AdminCog(commands.Cog):
             # Success confirmation (public for slash, short notice for prefix)
             success_msg = "✅ Account successfully generated — details have been sent to your direct messages."
             if is_slash:
-                await ctx.interaction.followup.send(success_msg)  # <- NOT ephemeral
+                await ctx.interaction.followup.send(success_msg)  # NOT ephemeral
             else:
                 try:
                     await ctx.message.delete()
@@ -293,12 +351,12 @@ class AdminCog(commands.Cog):
     # =========================================================
     @app_commands.command(name="alt_whitelist_add", description="Whitelist a user to use /alt without Manage Server.")
     @app_commands.describe(user="User to whitelist")
+    @app_commands.guild_only()
     async def alt_whitelist_add(self, interaction: discord.Interaction, user: discord.User):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
             return
         self.bot.add_alt_user(interaction.guild.id, user.id)
-        # PUBLIC message but suppress real pings
         await interaction.response.send_message(
             f"✅ {user.mention} whitelisted for /alt.",
             allowed_mentions=self.no_pings
@@ -306,6 +364,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="alt_whitelist_remove", description="Remove a user from the /alt whitelist.")
     @app_commands.describe(user="User to remove")
+    @app_commands.guild_only()
     async def alt_whitelist_remove(self, interaction: discord.Interaction, user: discord.User):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
@@ -315,6 +374,7 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(msg, allowed_mentions=self.no_pings)
 
     @app_commands.command(name="alt_whitelist_list", description="Show users whitelisted for /alt in this server.")
+    @app_commands.guild_only()
     async def alt_whitelist_list(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
@@ -340,6 +400,7 @@ class AdminCog(commands.Cog):
         description="Whitelist a ROLE to use /alt without Manage Server."
     )
     @app_commands.describe(role="Role to whitelist")
+    @app_commands.guild_only()
     async def alt_whitelist_role_add(self, interaction: discord.Interaction, role: discord.Role):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
@@ -355,6 +416,7 @@ class AdminCog(commands.Cog):
         description="Remove a ROLE from the /alt whitelist."
     )
     @app_commands.describe(role="Role to remove")
+    @app_commands.guild_only()
     async def alt_whitelist_role_remove(self, interaction: discord.Interaction, role: discord.Role):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
@@ -368,6 +430,7 @@ class AdminCog(commands.Cog):
         name="alt_whitelist_role_list",
         description="Show ROLES whitelisted for /alt in this server."
     )
+    @app_commands.guild_only()
     async def alt_whitelist_role_list(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
@@ -462,10 +525,31 @@ class AdminCog(commands.Cog):
             await interaction.followup.send(f"❌ Sync failed: {e}", ephemeral=True)
 
     # =========================================================
+    # Owner-only: Reload blacklist from env
+    # =========================================================
+    @app_commands.command(name="reload_blacklist", description="(Owner only) Reload the guild blacklist from environment.")
+    @app_commands.guild_only()
+    async def reload_blacklist(self, interaction: discord.Interaction):
+        try:
+            is_owner = await self.bot.is_owner(interaction.user)
+        except Exception:
+            is_owner = False
+        if not is_owner:
+            await interaction.response.send_message("❌ Only the bot owner can use this.", ephemeral=True)
+            return
+
+        self.guild_blacklist = _parse_guild_blacklist_from_env()
+        await interaction.response.send_message(
+            f"✅ Blacklist reloaded. {len(self.guild_blacklist)} guild ID(s) configured.",
+            ephemeral=True
+        )
+
+    # =========================================================
     # Bot modlist management (per-guild, persistent) – SLASH
     # =========================================================
     @app_commands.command(name="addmod", description="Add a role to this guild's bot-mod list (members with it can use the bot).")
     @app_commands.describe(role="Role to add")
+    @app_commands.guild_only()
     async def addmod(self, interaction: discord.Interaction, role: discord.Role):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ You need **Administrator** to use this.", ephemeral=True)
@@ -489,6 +573,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="removemod", description="Remove a role from this guild's bot-mod list.")
     @app_commands.describe(role="Role to remove")
+    @app_commands.guild_only()
     async def removemod(self, interaction: discord.Interaction, role: discord.Role):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ You need **Administrator** to use this.", ephemeral=True)
@@ -514,6 +599,7 @@ class AdminCog(commands.Cog):
         )
 
     @app_commands.command(name="listmods", description="Show this guild's bot-mod roles.")
+    @app_commands.guild_only()
     async def listmods(self, interaction: discord.Interaction):
         if not (interaction.user.guild_permissions.manage_guild or interaction.user.guild_permissions.administrator):
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
@@ -577,6 +663,7 @@ class AdminCog(commands.Cog):
         file4="Attach image/file (optional)",
         file5="Attach image/file (optional)",
     )
+    @app_commands.guild_only()
     async def say(
         self,
         interaction: discord.Interaction,
@@ -642,6 +729,7 @@ class AdminCog(commands.Cog):
         channel="Channel to send the announcement to (optional)",
         ping_role="Role to ping above the embed (optional)"
     )
+    @app_commands.guild_only()
     async def announce(
         self,
         interaction: discord.Interaction,
@@ -688,6 +776,7 @@ class AdminCog(commands.Cog):
         amount="Number of messages to delete (1-100)",
         user="Only delete messages from this user (optional)"
     )
+    @app_commands.guild_only()
     async def clear(self, interaction: discord.Interaction, amount: int, user: Optional[discord.Member] = None):
         if not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("❌ This command can only be used by server members.", ephemeral=True)
@@ -726,6 +815,7 @@ class AdminCog(commands.Cog):
             await interaction.followup.send(f"❌ Failed to delete messages: {e}", ephemeral=True)
 
     @app_commands.command(name="snipe", description="Show the last deleted message in this channel")
+    @app_commands.guild_only()
     async def snipe(self, interaction: discord.Interaction):
         channel_id = interaction.channel.id
 
@@ -751,6 +841,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="setprefix", description="Change the bot's command prefix")
     @app_commands.describe(prefix="New prefix for the bot (max 5 characters)")
+    @app_commands.guild_only()
     async def setprefix(self, interaction: discord.Interaction, prefix: str):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ You need administrator permission to change the prefix.", ephemeral=True)
@@ -775,6 +866,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="dm", description="Send a direct message to a user")
     @app_commands.describe(user="The user to send a DM to", message="The message to send")
+    @app_commands.guild_only()
     async def dm_user(self, interaction: discord.Interaction, user: discord.User, *, message: str):
         if not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
@@ -796,6 +888,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="setnick", description="Change a member's nickname")
     @app_commands.describe(member="The member to change nickname for", nickname="The new nickname (leave empty to remove nickname)")
+    @app_commands.guild_only()
     async def setnick(self, interaction: discord.Interaction, member: discord.Member, nickname: Optional[str] = None):
         if not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
@@ -829,6 +922,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="addrole", description="Add a role to a member")
     @app_commands.describe(member="The member to add the role to", role="The role to add")
+    @app_commands.guild_only()
     async def addrole(self, interaction: discord.Interaction, member: discord.Member, role: discord.Role):
         if not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
@@ -866,6 +960,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="watchuser", description="Add a user to the watch list for monitoring")
     @app_commands.describe(user="The user to add to watch list", reason="Reason for watching this user")
+    @app_commands.guild_only()
     async def watchuser(self, interaction: discord.Interaction, user: discord.User, *, reason: str = "No reason provided"):
         if not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
@@ -1014,4 +1109,18 @@ class AdminCog(commands.Cog):
 
 async def setup(bot):
     """Setup function for the cog."""
-    await bot.add_cog(AdminCog(bot))
+    cog = AdminCog(bot)
+    await bot.add_cog(cog)
+
+    # Global blacklist checks (apply once here):
+    # - Slash commands: block in blacklisted guilds
+    # - Prefix commands: block in blacklisted guilds
+    try:
+        bot.tree.add_check(cog._interaction_not_blacklisted)
+    except Exception as e:
+        cog.logger.error(f"Failed to add app command blacklist check: {e}")
+
+    try:
+        bot.add_check(cog._prefix_not_blacklisted)
+    except Exception as e:
+        cog.logger.error(f"Failed to add prefix blacklist check: {e}")
