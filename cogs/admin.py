@@ -86,6 +86,18 @@ class AdminCog(commands.Cog):
         # >>> global "no ping" policy you can reuse in sends <<<
         self.no_pings = discord.AllowedMentions.none()
 
+    # ---- Auto-sync slash commands on ready (once) ----
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if getattr(self.bot, "_did_tree_sync", False):
+            return
+        try:
+            await self.bot.tree.sync()  # global sync
+            self.bot._did_tree_sync = True
+            self.logger.info("App commands globally synced.")
+        except Exception as e:
+            self.logger.error(f"Failed to sync app commands: {e}")
+
     # ===== ALT role whitelist helpers (prefer bot persistence, fallback to memory) =====
     def _get_alt_role_ids(self, guild_id: int) -> set[int]:
         # Prefer your bot's persistent method if present
@@ -374,10 +386,11 @@ class AdminCog(commands.Cog):
         )
 
     # =========================================================
-    # Owner-only: Force the bot to leave a server
+    # Owner-only: Force the bot to leave a server (GUILD-ONLY)
     # =========================================================
     @app_commands.command(name="force_leave", description="(Owner only) Make the bot leave a server.")
     @app_commands.describe(guild_id="Guild ID to leave (default: the current server)")
+    @app_commands.checks.guild_only()
     async def force_leave(self, interaction: discord.Interaction, guild_id: Optional[str] = None):
         # Restrict to app owner
         try:
@@ -389,7 +402,7 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message("❌ Only the bot owner can use this.", ephemeral=True)
             return
 
-        # Determine target guild
+        # Determine target guild (by ID or current)
         target: Optional[discord.Guild] = None
         if guild_id:
             try:
@@ -427,6 +440,26 @@ class AdminCog(commands.Cog):
             ephemeral=True,
             allowed_mentions=self.no_pings
         )
+
+    # =========================================================
+    # Owner-only: Sync slash commands (slash + prefix)
+    # =========================================================
+    @app_commands.command(name="sync_commands", description="(Owner only) Sync slash commands now.")
+    @app_commands.checks.guild_only()
+    async def sync_commands(self, interaction: discord.Interaction):
+        try:
+            is_owner = await self.bot.is_owner(interaction.user)
+        except Exception:
+            is_owner = False
+        if not is_owner:
+            await interaction.response.send_message("❌ Only the bot owner can use this.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            synced = await self.bot.tree.sync()
+            await interaction.followup.send(f"✅ Synced **{len(synced)}** command(s).", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Sync failed: {e}", ephemeral=True)
 
     # =========================================================
     # Bot modlist management (per-guild, persistent) – SLASH
@@ -968,6 +1001,16 @@ class AdminCog(commands.Cog):
             await ctx.send(f"❌ Failed to leave: {e}", delete_after=8)
             return
         # No further confirmation (we just left)
+
+    @commands.command(name="synccommands")
+    @commands.is_owner()
+    async def prefix_synccommands(self, ctx: commands.Context):
+        await self.delete_command_message(ctx)
+        try:
+            synced = await self.bot.tree.sync()
+            await ctx.send(f"✅ Synced **{len(synced)}** command(s).", delete_after=6)
+        except Exception as e:
+            await ctx.send(f"❌ Sync failed: {e}", delete_after=8)
 
 async def setup(bot):
     """Setup function for the cog."""
