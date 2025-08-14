@@ -83,8 +83,38 @@ class AdminCog(commands.Cog):
             1379755293797384202,
         }
 
-        # >>> NEW: global "no ping" policy you can reuse in sends <<<
+        # global "no ping" policy you can reuse in sends
         self.no_pings = discord.AllowedMentions.none()
+
+    # ===== ALT role whitelist helpers =====
+    def _get_alt_role_ids(self, guild_id: int) -> set[int]:
+        # store on the bot so it survives cog reloads; swap to your own persistence if you have it
+        store = getattr(self.bot, "_alt_role_whitelist", None)
+        if store is None:
+            store = {}
+            setattr(self.bot, "_alt_role_whitelist", store)
+        return set(store.get(guild_id, set()))
+
+    def _add_alt_role(self, guild_id: int, role_id: int) -> None:
+        store = getattr(self.bot, "_alt_role_whitelist", None)
+        if store is None:
+            store = {}
+            setattr(self.bot, "_alt_role_whitelist", store)
+        s = store.setdefault(guild_id, set())
+        s.add(role_id)
+
+    def _remove_alt_role(self, guild_id: int, role_id: int) -> bool:
+        store = getattr(self.bot, "_alt_role_whitelist", None)
+        if not store or guild_id not in store:
+            return False
+        if role_id in store[guild_id]:
+            store[guild_id].remove(role_id)
+            return True
+        return False
+
+    def _member_has_alt_role(self, member: discord.Member) -> bool:
+        allowed_roles = self._get_alt_role_ids(member.guild.id)
+        return any((r.id in allowed_roles) for r in member.roles)
 
     async def delete_command_message(self, ctx):
         try:
@@ -131,7 +161,9 @@ class AdminCog(commands.Cog):
             return await _slash_reply("alts feature is disabled.") if is_slash else await ctx.send("alts feature is disabled.")
 
         member = ctx.author if isinstance(ctx.author, discord.Member) else None
-        if not (member and self.bot.allow_alt(member)):
+
+        # >>> CHANGED: allow either user-whitelisted OR role-whitelisted
+        if not (member and (self.bot.allow_alt(member) or self._member_has_alt_role(member))):
             return await _slash_reply("❌ You’re not allowed to use `/alt` in this server.", ephemeral=True) \
                    if is_slash else await ctx.send("❌ You’re not allowed to use `!alt` in this server.", delete_after=5)
 
@@ -263,6 +295,62 @@ class AdminCog(commands.Cog):
             mentions.append(u.mention if u else f"<@{uid}>")
         await interaction.response.send_message(
             "Whitelisted: " + ", ".join(mentions),
+            allowed_mentions=self.no_pings
+        )
+
+    # =========================================================
+    # Alt Whitelist (roles) — add / remove / list
+    # =========================================================
+    @app_commands.command(
+        name="alt_whitelist_role_add",
+        description="Whitelist a ROLE to use /alt without Manage Server."
+    )
+    @app_commands.describe(role="Role to whitelist")
+    async def alt_whitelist_role_add(self, interaction: discord.Interaction, role: discord.Role):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
+            return
+        self._add_alt_role(interaction.guild.id, role.id)
+        await interaction.response.send_message(
+            f"✅ {role.mention} whitelisted for /alt.",
+            allowed_mentions=self.no_pings
+        )
+
+    @app_commands.command(
+        name="alt_whitelist_role_remove",
+        description="Remove a ROLE from the /alt whitelist."
+    )
+    @app_commands.describe(role="Role to remove")
+    async def alt_whitelist_role_remove(self, interaction: discord.Interaction, role: discord.Role):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
+            return
+        removed = self._remove_alt_role(interaction.guild.id, role.id)
+        msg = (
+            f"✅ Removed {role.mention} from whitelist."
+            if removed else
+            f"ℹ️ {role.mention} wasn’t whitelisted."
+        )
+        await interaction.response.send_message(msg, allowed_mentions=self.no_pings)
+
+    @app_commands.command(
+        name="alt_whitelist_role_list",
+        description="Show ROLES whitelisted for /alt in this server."
+    )
+    async def alt_whitelist_role_list(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
+            return
+        ids = sorted(self._get_alt_role_ids(interaction.guild.id))
+        if not ids:
+            await interaction.response.send_message("No roles are whitelisted.")
+            return
+        mentions = []
+        for rid in ids:
+            r = interaction.guild.get_role(rid)
+            mentions.append(r.mention if r else f"<@&{rid}>")
+        await interaction.response.send_message(
+            "Role-whitelisted for /alt: " + ", ".join(mentions),
             allowed_mentions=self.no_pings
         )
 
