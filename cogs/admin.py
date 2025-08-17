@@ -103,15 +103,18 @@ class AdminCog(commands.Cog):
         # Env-driven blacklist
         self.guild_blacklist: set[int] = _parse_guild_blacklist_from_env()
 
-    # ===== ALT role whitelist helpers (prefer bot persistence, fallback to memory) =====
+    # ===== ALT role whitelist helpers (robust) =====
     def _get_alt_role_ids(self, guild_id: int) -> set[int]:
-        # Prefer your bot's persistent method if present
+        """Return role IDs allowed to use /alt in a guild."""
+        # Prefer persistent method if it returns usable data
         if hasattr(self.bot, "get_alt_role_ids"):
             try:
-                return set(self.bot.get_alt_role_ids(guild_id) or [])
+                data = self.bot.get_alt_role_ids(guild_id)
+                if data:  # only trust if not None/empty
+                    return set(data)
             except Exception:
                 pass
-        # Fallback to in-memory store on the bot
+        # Fallback to in-memory store on the bot object
         store = getattr(self.bot, "_alt_role_whitelist", None)
         if store is None:
             store = {}
@@ -119,12 +122,16 @@ class AdminCog(commands.Cog):
         return set(store.get(guild_id, set()))
 
     def _add_alt_role(self, guild_id: int, role_id: int) -> None:
+        """Add a role to the whitelist, persisting if possible and always keeping a fallback copy."""
+        persisted = False
         if hasattr(self.bot, "add_alt_role"):
             try:
-                self.bot.add_alt_role(guild_id, role_id)
-                return
+                res = self.bot.add_alt_role(guild_id, role_id)
+                if res is not False:
+                    persisted = True
             except Exception:
-                pass
+                persisted = False
+        # Always ensure our in-memory fallback is updated too
         store = getattr(self.bot, "_alt_role_whitelist", None)
         if store is None:
             store = {}
@@ -132,18 +139,19 @@ class AdminCog(commands.Cog):
         store.setdefault(guild_id, set()).add(role_id)
 
     def _remove_alt_role(self, guild_id: int, role_id: int) -> bool:
+        """Remove a role from the whitelist (persistent + fallback)."""
+        removed = False
         if hasattr(self.bot, "remove_alt_role"):
             try:
-                return bool(self.bot.remove_alt_role(guild_id, role_id))
+                removed = bool(self.bot.remove_alt_role(guild_id, role_id))
             except Exception:
-                pass
+                removed = False
+        # Also remove from fallback
         store = getattr(self.bot, "_alt_role_whitelist", None)
-        if not store or guild_id not in store:
-            return False
-        if role_id in store[guild_id]:
+        if store and guild_id in store and role_id in store[guild_id]:
             store[guild_id].remove(role_id)
-            return True
-        return False
+            removed = True or removed
+        return removed
 
     def _member_has_alt_role(self, member: discord.Member) -> bool:
         allowed_roles = self._get_alt_role_ids(member.guild.id)
