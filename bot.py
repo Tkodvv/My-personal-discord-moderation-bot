@@ -28,24 +28,31 @@ class DiscordBot(commands.Bot):
     ALT_FILE = os.path.join(DATA_DIR, "alt_whitelist.json")
 
     def __init__(self):
-        # Intents: only what we need
-        intents = discord.Intents.none()
-        intents.guilds = True
-        intents.members = True
-        intents.message_content = True
-        intents.moderation = True
+        # Setup required intents
+        intents = discord.Intents.default()
+        intents.message_content = True  # Needed for prefix commands
+        intents.members = True  # Needed for member cache
+        intents.guilds = True   # Needed for guild operations
+        intents.presences = True  # Needed for status commands
 
+        # Initialize with fixed "!" prefix
+        self._text_prefix = "!"
+        
+        def get_prefix(bot, message):
+            # Always allow mention and "!" prefix
+            return commands.when_mentioned_or("!")(bot, message)
+        
         super().__init__(
-            command_prefix=commands.when_mentioned_or("!"),  # mention or !
+            command_prefix=get_prefix,  # Use the prefix getter function
             intents=intents,
             help_command=None,
             case_insensitive=True,
-            chunk_guilds_at_startup=False,
-            member_cache_flags=discord.MemberCacheFlags.none(),
-            max_messages=1000,
-            command_attrs={"hidden": True},
+            chunk_guilds_at_startup=True,  # Enable chunking for member caching
+            member_cache_flags=discord.MemberCacheFlags.all(),  # Cache all member data
+            max_messages=1000
         )
-
+        
+        # Initialize logger
         self.logger = logging.getLogger(__name__)
 
         # ---- runtime state / persistence containers (MOVED OUT OF on_message) ----
@@ -63,12 +70,50 @@ class DiscordBot(commands.Bot):
         # optional flag some cogs check
         self._did_tree_sync = False
 
+    async def setup_hook(self):
+        """Load extensions and sync commands when the bot starts."""
+        # Load all cogs
+        for filename in os.listdir("cogs"):
+            if filename.endswith(".py") and not filename.startswith("_"):
+                try:
+                    await self.load_extension(f"cogs.{filename[:-3]}")
+                    self.logger.info(f"Loaded extension: {filename[:-3]}")
+                except Exception as e:
+                    self.logger.error(f"Failed to load extension {filename}: {e}")
+                    
+        # Sync all commands
+        try:
+            synced = await self.tree.sync()
+            self.logger.info(f"Synced {len(synced)} slash commands")
+            self._did_tree_sync = True
+            self.last_sync_time = utcnow()
+        except Exception as e:
+            self.logger.error(f"Failed to sync commands: {e}")
+
     # ---------- message handling ----------
     async def on_message(self, message: discord.Message):
-        """Process prefix commands. (Init work is no longer done here.)"""
+        """Process commands and handle prefix command deletion."""
         if message.author.bot:
             return
-        await self.process_commands(message)
+
+        ctx = await self.get_context(message)
+        
+        # For prefix commands only
+        if message.content.startswith(self._text_prefix):
+            try:
+                # Process the command
+                await self.invoke(ctx)
+                
+                # Try to delete the command message
+                try:
+                    await message.delete()
+                except (discord.NotFound, discord.Forbidden):
+                    pass  # Message already deleted or no permissions
+            except Exception as e:
+                self.logger.error(f"Command processing error: {e}", exc_info=True)
+        else:
+            # For non-prefix messages (e.g., mentions), just process normally
+            await self.invoke(ctx)
 
     # ---------- mod whitelist persistence helpers ----------
     def load_mod_whitelist(self) -> None:
@@ -270,8 +315,7 @@ class DiscordBot(commands.Bot):
         self.add_check(self._prefix_role_gate)
 
         # Slash commands: global gate
-        @self.tree.interaction_check
-        async def _global_slash_gate(interaction: discord.Interaction) -> bool:
+        async def _check_interaction(interaction: discord.Interaction) -> bool:
             if not interaction.guild:
                 await interaction.response.send_message("❌ Commands can only be used in a server.", ephemeral=True)
                 return False
@@ -298,6 +342,8 @@ class DiscordBot(commands.Bot):
 
             await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
             return False
+            
+        self.tree.interaction_check = _check_interaction
 
         # Sync slash commands
         try:
@@ -331,20 +377,29 @@ class DiscordBot(commands.Bot):
             return
         self.logger.error(f"Command error in {getattr(ctx, 'command', None)}: {error}")
 
-        if isinstance(error, commands.NoPrivateMessage):
-            await ctx.send("❌ This command can only be used in a server.", delete_after=5)
-            return
+        try:
+            if isinstance(error, commands.NoPrivateMessage):
+                msg = "❌ This command can only be used in a server."
+            elif isinstance(error, commands.CheckFailure):
+                msg = "❌ You don't have permission to use this command."
+            elif isinstance(error, commands.MissingPermissions):
+                msg = "❌ You don't have permission to use this command."
+            elif isinstance(error, commands.BotMissingPermissions):
+                msg = "❌ I don't have the necessary permissions to execute this command."
+            else:
+                msg = "❌ An error occurred while executing the command."
 
-        if isinstance(error, commands.CheckFailure):
-            await ctx.send("❌ You don't have permission to use this command.", delete_after=5)
-            return
-
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.send("❌ You don't have permission to use this command.")
-        elif isinstance(error, commands.BotMissingPermissions):
-            await ctx.send("❌ I don't have the necessary permissions to execute this command.")
-        else:
-            await ctx.send("❌ An error occurred while executing the command.")
+            # Handle different types of contexts
+            if hasattr(ctx, 'interaction') and ctx.interaction:
+                if not ctx.interaction.response.is_done():
+                    await ctx.interaction.response.send_message(msg, ephemeral=True)
+                else:
+                    await ctx.interaction.followup.send(msg, ephemeral=True)
+            else:
+                await ctx.send(msg, delete_after=5)
+                
+        except Exception as e:
+            self.logger.error(f"Error sending error message: {e}", exc_info=True)
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         self.logger.error(f"Slash command error: {error}")

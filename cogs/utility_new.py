@@ -17,101 +17,6 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-
-class EmbedModal(discord.ui.Modal, title='Create Custom Embed'):
-    """Modal for creating custom embeds with proper formatting."""
-    
-    def __init__(self):
-        super().__init__()
-        
-    title_input = discord.ui.TextInput(
-        label='Title',
-        placeholder='Enter the embed title (optional)',
-        required=False,
-        max_length=256
-    )
-    
-    description_input = discord.ui.TextInput(
-        label='Description',
-        placeholder='Enter the embed description/content',
-        style=discord.TextStyle.paragraph,
-        required=False,
-        max_length=4000
-    )
-    
-    color_input = discord.ui.TextInput(
-        label='Color',
-        placeholder='Enter color (hex like #ff0000 or name like red)',
-        required=False,
-        max_length=50
-    )
-    
-    author_input = discord.ui.TextInput(
-        label='Author Name',
-        placeholder='Enter author name (optional)',
-        required=False,
-        max_length=256
-    )
-    
-    author_icon_input = discord.ui.TextInput(
-        label='Author Icon URL',
-        placeholder='Enter author icon URL (optional)',
-        required=False,
-        max_length=2048
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        # Check permissions
-        if not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("❌ You need `manage_messages` permission to use this command.", ephemeral=True)
-            return
-            
-        # Validate input
-        if not self.title_input.value and not self.description_input.value:
-            await interaction.response.send_message("❌ You must provide at least a title or description for the embed.", ephemeral=True)
-            return
-            
-        # Create embed
-        embed = discord.Embed()
-        
-        # Set title and description
-        if self.title_input.value:
-            embed.title = self.title_input.value
-        if self.description_input.value:
-            embed.description = self.description_input.value
-            
-        # Set color
-        if self.color_input.value:
-            try:
-                color_value = self.color_input.value.strip()
-                # Handle hex colors
-                if color_value.startswith('#'):
-                    embed.color = discord.Color(int(color_value[1:], 16))
-                # Handle named colors
-                elif hasattr(discord.Color, color_value.lower()):
-                    embed.color = getattr(discord.Color, color_value.lower())()
-                else:
-                    # Try to parse as hex without #
-                    embed.color = discord.Color(int(color_value, 16))
-            except (ValueError, AttributeError):
-                embed.color = discord.Color.blue()  # Default color
-        else:
-            embed.color = discord.Color.blue()
-            
-        # Set author
-        if self.author_input.value:
-            try:
-                if self.author_icon_input.value:
-                    embed.set_author(name=self.author_input.value, icon_url=self.author_icon_input.value)
-                else:
-                    embed.set_author(name=self.author_input.value)
-            except:
-                embed.set_author(name=self.author_input.value)  # Fallback without icon
-                
-        # Send embed silently (no confirmation message)
-        await interaction.response.send_message(embed=embed)
-
-
 class UtilityCog(commands.Cog):
     """Utility commands cog."""
 
@@ -123,7 +28,7 @@ class UtilityCog(commands.Cog):
     async def ping(self, ctx: commands.Context):
         """Check the bot's latency."""
         latency = round(self.bot.latency * 1000)
-        await ctx.send(f"🏓 Pong! Latency: {latency}ms")
+        await ctx.send(f"🏓 Pong! Latency: {latency}ms", ephemeral=True)
 
     @commands.hybrid_command(name="uptime", description="Check bot's uptime")
     async def uptime(self, ctx: commands.Context):
@@ -135,13 +40,6 @@ class UtilityCog(commands.Cog):
         
         uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
         await ctx.send(f"⏰ Bot uptime: `{uptime_str}`", ephemeral=True)
-
-    @app_commands.command(name="embed", description="Create a custom embed message with popup form")
-    @app_commands.default_permissions(manage_messages=True)
-    async def embed_slash(self, interaction: discord.Interaction):
-        """Create a custom embed message using a modal popup."""
-        modal = EmbedModal()
-        await interaction.response.send_modal(modal)
 
     @commands.hybrid_command(name="userinfo", description="Get information about a user")
     @app_commands.describe(user="User to get info about")
@@ -273,19 +171,18 @@ class UtilityCog(commands.Cog):
                     if response.status == 200:
                         data = await response.json()
                         if data and isinstance(data, list):
-                            # Create embed for each cat
-                            for item in data:
-                                cat_url = item.get("url")
-                                if cat_url:
-                                    embed = discord.Embed(
-                                        title="🐱 Random Cat",
-                                        color=discord.Color.orange()
-                                    )
-                                    embed.set_image(url=cat_url)
-                                    await ctx.send(embed=embed)
-                                    if len(data) > 1:
-                                        await asyncio.sleep(0.5)  # Small delay between multiple cats
-                            return
+                            # Send first message with text
+                            first_url = data[0].get("url") if data else None
+                            if first_url:
+                                await ctx.send(f"🐱 Here {'is your cat' if n == 1 else f'are your {n} cats'}:\n{first_url}")
+                                
+                                # Send additional cats if requested
+                                for item in data[1:]:
+                                    cat_url = item.get("url")
+                                    if cat_url:
+                                        await asyncio.sleep(0.5)  # Small delay between sends
+                                        await ctx.send(cat_url)
+                                return
                     else:
                         await ctx.send(f"❌ Cat API error: HTTP {response.status}", ephemeral=True)
                         return
@@ -309,13 +206,43 @@ class UtilityCog(commands.Cog):
                         data = await response.json()
                         dog_url = data.get("url")
                         if dog_url:
-                            await ctx.send(dog_url)  # Send only the image URL for cleaner look
+                            await ctx.send(f"🐶 Here's your dog:\n{dog_url}")
                             return
                     
                     await ctx.send(f"❌ Dog API error: HTTP {response.status}", ephemeral=True)
                     
         except Exception as e:
             await ctx.send(f"❌ Failed to fetch dog: {str(e)}", ephemeral=True)
+
+    @commands.hybrid_command(name="invite", description="Get bot invite link")
+    async def invite(self, ctx: commands.Context):
+        """Get the bot's invite link."""
+        if not self.bot.user:
+            await ctx.send("❌ Bot user not available.", ephemeral=True)
+            return
+            
+        permissions = discord.Permissions(
+            ban_members=True,
+            kick_members=True,
+            manage_messages=True,
+            manage_roles=True,
+            view_audit_log=True,
+            send_messages=True,
+            embed_links=True,
+            attach_files=True,
+            read_message_history=True,
+            use_slash_commands=True
+        )
+        
+        invite_url = discord.utils.oauth_url(self.bot.user.id, permissions=permissions)
+        
+        embed = discord.Embed(
+            title="🤖 Bot Invite Link",
+            description=f"[Click here to invite me to your server!]({invite_url})",
+            color=discord.Color.blue()
+        )
+        
+        await ctx.send(embed=embed, ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(UtilityCog(bot))

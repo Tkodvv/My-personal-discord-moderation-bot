@@ -23,15 +23,9 @@ async def get_alt_public():
     headers = {"x-api-key": API_KEY, "Accept": "application/json", "User-Agent": "ModBot/1.0"}
 
     async with httpx.AsyncClient(timeout=20.0) as client:
-        r = await client.post(url, headers=headers)  # provider’s example shows POST
+        r = await client.get(url, headers=headers)  # Use GET instead of POST (fixes 405 error)
         r.raise_for_status()
-        data = _sanitize(r.json())
+        data = r.json()  # Return raw data from TRIGEN API
 
-    username     = data.get("username") or data.get("name") or data.get("user")
-    display_name = data.get("displayName") or data.get("display_name") or username
-    avatar_url   = data.get("avatarUrl")  or data.get("avatar_url")
-    bio          = data.get("bio") or ""
-
-    core = {"username","name","user","displayName","display_name","avatarUrl","avatar_url","bio"}
-    meta = {k: v for k, v in data.items() if k not in core}
-    return {"username": username, "displayName": display_name, "avatarUrl": avatar_url, "bio": bio, "meta": meta}
+    # Return the complete data from TRIGEN API
+    return data

@@ -89,11 +89,11 @@ class AdminCog(commands.Cog):
 
         # Defer for slash commands since this might take time
         if ctx.interaction:
-            await ctx.defer()  # Remove ephemeral=True to make responses public
+            await ctx.defer(ephemeral=True)
 
         try:
             alt_data = await get_alt_public()
-            if not alt_data or not (alt_data.get("username") or alt_data.get("name")):
+            if not alt_data or not alt_data.get("username"):
                 await ctx.send("❌ Failed to generate alt account. Please try again later.", ephemeral=True)
                 return
 
@@ -104,14 +104,11 @@ class AdminCog(commands.Cog):
                 color=0x2F3136
             )
             
-            if username := (alt_data.get("username") or alt_data.get("name")):
+            if username := alt_data.get("username"):
                 embed.add_field(name="👤 Username", value=f"`{username}`", inline=True)
             if password := alt_data.get("password"):
                 if os.getenv("ALT_SHOW_PASSWORD", "true").lower() in {"1", "true", "yes", "y"}:
                     embed.add_field(name="🔒 Password", value=f"`{password}`", inline=True)
-            if cookie := alt_data.get("cookie"):
-                # Show full cookie value
-                embed.add_field(name="🍪 Cookie", value=f"`{cookie}`", inline=False)
             if user_id := alt_data.get("userId"):
                 embed.add_field(name="🔢 User ID", value=f"`{user_id}`", inline=True)
 
@@ -142,14 +139,11 @@ class AdminCog(commands.Cog):
             # Try to send DM
             try:
                 await ctx.author.send(embed=embed)
-                # Send public success message
                 public_embed = discord.Embed(
-                    title="🎉 Roblox Account Generated!",
-                    description=f"✅ Account successfully generated and sent to {ctx.author.mention}'s DMs!",
+                    description=f"✅ Account details sent to {ctx.author.mention}'s DMs!",
                     color=discord.Color.green()
                 )
-                public_embed.set_footer(text="Check your DMs for account details")
-                await ctx.send(embed=public_embed)  # Remove ephemeral=True to make it public
+                await ctx.send(embed=public_embed, ephemeral=True)
                         
             except discord.Forbidden:
                 await ctx.send("❌ I couldn't DM you. Please enable DMs from server members and try again.", ephemeral=True)
