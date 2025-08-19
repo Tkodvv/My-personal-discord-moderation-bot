@@ -108,8 +108,10 @@ class EmbedModal(discord.ui.Modal, title='Create Custom Embed'):
             except:
                 embed.set_author(name=self.author_input.value)  # Fallback without icon
                 
-        # Send embed silently (no confirmation message)
-        await interaction.response.send_message(embed=embed)
+        # Send ephemeral response first (hides the slash command usage)
+        await interaction.response.send_message("✅", ephemeral=True)
+        # Then send the actual embed publicly
+        await interaction.followup.send(embed=embed)
 
 
 class UtilityCog(commands.Cog):
