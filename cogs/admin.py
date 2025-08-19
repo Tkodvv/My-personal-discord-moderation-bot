@@ -123,14 +123,11 @@ class AdminCog(commands.Cog):
 
     def _add_alt_role(self, guild_id: int, role_id: int) -> None:
         """Add a role to the whitelist, persisting if possible and always keeping a fallback copy."""
-        persisted = False
         if hasattr(self.bot, "add_alt_role"):
             try:
-                res = self.bot.add_alt_role(guild_id, role_id)
-                if res is not False:
-                    persisted = True
+                self.bot.add_alt_role(guild_id, role_id)
             except Exception:
-                persisted = False
+                pass
         # Always ensure our in-memory fallback is updated too
         store = getattr(self.bot, "_alt_role_whitelist", None)
         if store is None:
@@ -150,7 +147,7 @@ class AdminCog(commands.Cog):
         store = getattr(self.bot, "_alt_role_whitelist", None)
         if store and guild_id in store and role_id in store[guild_id]:
             store[guild_id].remove(role_id)
-            removed = True or removed
+            removed = True
         return removed
 
     def _member_has_alt_role(self, member: discord.Member) -> bool:
@@ -257,119 +254,93 @@ class AdminCog(commands.Cog):
     @commands.hybrid_command(name="alt", description="Generate a Roblox alt and DM the credentials to you.")
     @commands.cooldown(1, 5, commands.BucketType.guild)
     async def alt(self, ctx: commands.Context):
-        import datetime as dt
-
-        enabled = os.getenv("MOD_ENABLE_RBX_ALT", "false").lower() in {"1","true","yes","y"}
-        show_pw = os.getenv("ALT_SHOW_PASSWORD", "true").lower() in {"1","true","yes","y"}
-        is_slash = getattr(ctx, "interaction", None) is not None
-
-        async def _slash_reply(msg: str, *, ephemeral: bool = True):
-            """Safe reply helper for slash branch."""
-            if not is_slash:
-                return
-            try:
-                if not ctx.interaction.response.is_done():
-                    await ctx.interaction.response.send_message(msg, ephemeral=ephemeral)
-                else:
-                    await ctx.interaction.followup.send(msg, ephemeral=ephemeral)
-            except Exception:
-                pass
-
-        if not enabled:
-            return await _slash_reply("alts feature is disabled.") if is_slash else await ctx.send("alts feature is disabled.")
-
+        """Generate and DM a Roblox alt account."""
+        
+        # Check if feature is enabled
+        if not os.getenv("MOD_ENABLE_RBX_ALT", "false").lower() in {"1", "true", "yes", "y"}:
+            return await ctx.send("❌ Alt generation is currently disabled.")
+        
+        # Verify permissions
         member = ctx.author if isinstance(ctx.author, discord.Member) else None
-        # allow either user-whitelisted OR role-whitelisted
         if not (member and (self.bot.allow_alt(member) or self._member_has_alt_role(member))):
-            return await _slash_reply("❌ You’re not allowed to use `/alt` in this server.", ephemeral=True) \
-                   if is_slash else await ctx.send("❌ You’re not allowed to use `!alt` in this server.", delete_after=5)
+            return await ctx.send("❌ You don't have permission to use this command.", delete_after=5)
 
-        # For slash: defer NON-ephemeral so the final success message can be public
-        if is_slash:
-            try:
-                await ctx.interaction.response.defer()  # not ephemeral
-            except Exception:
-                pass
-
+        is_slash = bool(ctx.interaction)
+        
         try:
-            prof = await get_alt_public()
-            if not prof or not prof.get("username"):
-                if is_slash:
-                    await ctx.interaction.followup.send("❌ couldn't fetch a random alt rn, try again later.")
-                else:
-                    await ctx.send("❌ couldn't fetch a random alt rn, try again later.", delete_after=6)
-                return
+            # Get alt credentials
+            alt_data = await get_alt_public()
+            if not alt_data or not alt_data.get("username"):
+                return await ctx.send("❌ Failed to generate alt account. Please try again later.")
 
-            username = (prof.get("username") or "").strip()
-            password = (prof.get("password") or "").strip()
-            user_id  = str(prof.get("userId") or "")
-            created_raw = prof.get("createdAt") or ""
-            avatar_url  = prof.get("avatarUrl")
-
-            # parse creation date into M/D/YYYY if possible
-            creation_date = None
-            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%m/%d/%Y", "%Y-%m-%d"):
-                try:
-                    creation_date = dt.datetime.strptime(created_raw, fmt).strftime("%-m/%-d/%Y")
-                    break
-                except Exception:
-                    pass
-            if not creation_date and created_raw:
-                creation_date = str(created_raw)
-
-            embed = discord.Embed(
-                title="Generated Roblox Account",
-                description="Your account has been generated successfully! Keep it safe and **do not share it with anyone.**",
-                color=discord.Color.red()
+            # Send public confirmation first
+            public_embed = discord.Embed(
+                title="🎮 Alt Account Generated",
+                description=f"Account credentials have been sent to {ctx.author.mention}'s DMs!",
+                color=discord.Color.green()
             )
+            if avatar_url := alt_data.get("avatarUrl"):
+                public_embed.set_thumbnail(url=avatar_url)
+            
+            await ctx.send(embed=public_embed)
+
+            # Build DM embed with credentials
+            dm_embed = discord.Embed(
+                title="🎮 Your Generated Account",
+                description="**Keep these credentials safe and change the password immediately!**",
+                color=discord.Color.blue()
+            )
+
+            if username := alt_data.get("username"):
+                dm_embed.add_field(name="Username", value=f"`{username}`", inline=False)
+            
+            if password := alt_data.get("password"):
+                if os.getenv("ALT_SHOW_PASSWORD", "true").lower() in {"1", "true", "yes", "y"}:
+                    dm_embed.add_field(name="Password", value=f"`{password}`", inline=False)
+
+            if user_id := alt_data.get("userId"):
+                dm_embed.add_field(name="User ID", value=f"`{user_id}`", inline=False)
+
+            if created_at := alt_data.get("createdAt"):
+                try:
+                    date_formats = [
+                        "%Y-%m-%dT%H:%M:%S.%fZ",
+                        "%Y-%m-%dT%H:%M:%SZ",
+                        "%m/%d/%Y",
+                        "%Y-%m-%d"
+                    ]
+                    for fmt in date_formats:
+                        try:
+                            parsed_date = datetime.strptime(created_at, fmt)
+                            dm_embed.add_field(name="Created", value=f"`{parsed_date.strftime('%m/%d/%Y')}`", inline=False)
+                            break
+                        except ValueError:
+                            continue
+                except Exception:
+                    pass
+
             if avatar_url:
-                embed.set_thumbnail(url=avatar_url)
+                dm_embed.set_thumbnail(url=avatar_url)
 
-            embed.add_field(name="Username", value=f"`{username}`", inline=False)
-            if show_pw and password:
-                embed.add_field(name="Password", value=f"`{password}`", inline=False)
-            if user_id:
-                embed.add_field(name="User ID", value=f"`{user_id}`", inline=False)
-            if creation_date:
-                embed.add_field(name="Creation Date", value=f"`{creation_date}`", inline=False)
-            embed.set_footer(text="You must change the password to keep the account!")
+            dm_embed.set_footer(text="⚠️ Change the password immediately to secure the account!")
 
-            # Always DM the credentials
+            # Send credentials via DM
             try:
-                await ctx.author.send(embed=embed)
+                await ctx.author.send(embed=dm_embed)
             except discord.Forbidden:
-                if is_slash:
-                    await ctx.interaction.followup.send(
-                        "❌ I couldn't DM you. Please enable DMs from server members and try again."
-                    )
-                else:
-                    await ctx.send(
-                        "❌ I couldn't DM you. Please enable DMs from server members and try again.",
-                        delete_after=8
-                    )
+                await ctx.send(f"❌ {ctx.author.mention}, I couldn't DM you. Please enable DMs from server members and try again.")
                 return
-
-            # Success confirmation (public for slash, short notice for prefix)
-            success_msg = "✅ Account successfully generated — details have been sent to your direct messages."
-            if is_slash:
-                await ctx.interaction.followup.send(success_msg)  # NOT ephemeral
-            else:
-                try:
-                    await ctx.message.delete()
-                except Exception:
-                    pass
-                try:
-                    await ctx.send(success_msg, delete_after=5)
-                except Exception:
-                    pass
 
         except commands.CommandOnCooldown as e:
-            msg = f"slow down — try again in {e.retry_after:.1f}s"
-            return await _slash_reply(msg, ephemeral=True) if is_slash else await ctx.send(msg)
+            await ctx.send(f"⏰ Slow down! Try again in {e.retry_after:.1f}s")
+            
+        except httpx.HTTPError as e:
+            log.error(f"Alt API error: {getattr(e.response, 'status_code', 'unknown')}")
+            await ctx.send("❌ Failed to contact alt service. Please try again later.")
+            
         except Exception as e:
-            self.logger.error("alt command failed: %s", e)
-            return await _slash_reply("couldn't fetch a random alt rn, try again later.", ephemeral=True) \
-                   if is_slash else await ctx.send("couldn't fetch a random alt rn, try again later.")
+            log.exception("Alt generation failed")
+            await ctx.send("❌ An unexpected error occurred. Please try again later.")
 
     # =========================================================
     # Alt Whitelist (slash) — uses bot's PERSISTENT storage
@@ -404,16 +375,23 @@ class AdminCog(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
             return
+
+        # Defer because fetching users can take time (and debugging pauses exceed 3s)
+        await interaction.response.defer(ephemeral=True)
+
         ids = sorted(self.bot.get_alt_users(interaction.guild.id))
         if not ids:
-            await interaction.response.send_message("No users are whitelisted.")
+            await interaction.followup.send("No users are whitelisted.", ephemeral=True)
             return
+
         mentions = []
         for uid in ids:
             u = interaction.guild.get_member(uid) or await interaction.client.fetch_user(uid)
             mentions.append(u.mention if u else f"<@{uid}>")
-        await interaction.response.send_message(
+
+        await interaction.followup.send(
             "Whitelisted: " + ", ".join(mentions),
+            ephemeral=True,
             allowed_mentions=self.no_pings
         )
 
@@ -460,16 +438,23 @@ class AdminCog(commands.Cog):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
             return
+
+        # Defer to avoid 10062 when stepping in a debugger or on slow guilds
+        await interaction.response.defer(ephemeral=True)
+
         ids = sorted(self._get_alt_role_ids(interaction.guild.id))
         if not ids:
-            await interaction.response.send_message("No roles are whitelisted.")
+            await interaction.followup.send("No roles are whitelisted.", ephemeral=True)
             return
+
         mentions = []
         for rid in ids:
             r = interaction.guild.get_role(rid)
             mentions.append(r.mention if r else f"<@&{rid}>")
-        await interaction.response.send_message(
+
+        await interaction.followup.send(
             "Role-whitelisted for /alt: " + ", ".join(mentions),
+            ephemeral=True,
             allowed_mentions=self.no_pings
         )
 

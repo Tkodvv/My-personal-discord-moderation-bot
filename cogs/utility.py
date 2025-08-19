@@ -743,28 +743,46 @@ class UtilityCog(commands.Cog):
     # =========================
     @app_commands.command(name="health", description="Show bot health: ping, servers, uptime")
     async def health(self, interaction: discord.Interaction):
-        """Bot health overview with ping + server count + uptime."""
-        latency = round(self.bot.latency * 1000)
-        servers = len(self.bot.guilds)
-        uptime_duration = utcnow() - self.start_time
-        days = uptime_duration.days
-        hours, remainder = divmod(uptime_duration.seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        parts = []
+        """Show bot health overview with ping + server count + uptime."""
+        # Collect all stats before creating embed
+        stats = {
+            "latency": round(self.bot.latency * 1000),
+            "servers": len(self.bot.guilds),
+            "uptime": utcnow() - self.start_time
+        }
+        
+        # Format uptime
+        days = stats["uptime"].days
+        hours, rem = divmod(stats["uptime"].seconds, 3600)
+        minutes, seconds = divmod(rem, 60)
+        
+        uptime_parts = []
         if days > 0:
-            parts.append(f"{days}d")
+            uptime_parts.append(f"{days}d")
         if hours > 0:
-            parts.append(f"{hours}h")
+            uptime_parts.append(f"{hours}h")
         if minutes > 0:
-            parts.append(f"{minutes}m")
-        parts.append(f"{seconds}s")
-        uptime_text = " ".join(parts)
+            uptime_parts.append(f"{minutes}m")
+        uptime_parts.append(f"{seconds}s")
 
-        embed = discord.Embed(title="🩺 Bot Health", color=discord.Color.green())
-        embed.add_field(name="Ping", value=f"{latency}ms", inline=True)
-        embed.add_field(name="Servers", value=str(servers), inline=True)
-        embed.add_field(name="Uptime", value=uptime_text, inline=False)
-        embed.add_field(name="Started", value=format_dt(self.start_time, style="F"), inline=False)
+        # Create and send embed immediately
+        embed = discord.Embed(
+            title="🤖 Bot Health",
+            color=discord.Color.green() if stats["latency"] < 300 else discord.Color.orange()
+        )
+        
+        embed.add_field(
+            name="📊 Stats",
+            value=f"Ping: **{stats['latency']}ms**\nServers: **{stats['servers']:,}**",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="⏰ Uptime",
+            value=f"Running for: **{' '.join(uptime_parts)}**\nStarted: {format_dt(self.start_time, 'R')}",
+            inline=False
+        )
+
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="userinfo", description="Get information about a user")
@@ -852,40 +870,131 @@ class UtilityCog(commands.Cog):
         embed.add_field(name="Download Links", value=" | ".join(avatar_formats), inline=False)
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="serverinfo", description="Get information about the server")
+    @app_commands.command(name="serverinfo", description="Get detailed information about the server")
     async def serverinfo(self, interaction: discord.Interaction):
+        """Display comprehensive server information with detailed stats."""
         guild = interaction.guild
         if not guild:
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
 
+        # Member Statistics (optimize counts)
+        total_members = guild.member_count or len(guild.members)
+        member_stats = {"humans": 0, "bots": 0, "online": 0, "idle": 0, "dnd": 0, "offline": 0}
+        
+        for member in guild.members:
+            if member.bot:
+                member_stats["bots"] += 1
+            else:
+                member_stats["humans"] += 1
+            member_stats[str(member.status)] += 1
+
+        # Channel & Role Statistics (single-pass counting)
+        channels = {"text": 0, "voice": 0, "stage": 0, "forum": 0, "category": 0}
+        for channel in guild.channels:
+            if isinstance(channel, discord.TextChannel):
+                channels["text"] += 1
+            elif isinstance(channel, discord.VoiceChannel):
+                channels["voice"] += 1
+            elif isinstance(channel, discord.StageChannel):
+                channels["stage"] += 1
+            elif isinstance(channel, discord.ForumChannel):
+                channels["forum"] += 1
+            elif isinstance(channel, discord.CategoryChannel):
+                channels["category"] += 1
+
+        # Role Statistics
+        roles = {
+            "total": len(guild.roles) - 1,  # Exclude @everyone
+            "managed": sum(1 for r in guild.roles if r.managed),
+            "hoisted": sum(1 for r in guild.roles if r.hoist),
+            "colored": sum(1 for r in guild.roles if r.color.value != 0)
+        }
+
         embed = discord.Embed(
-            title=f"Server Information - {guild.name}",
-            color=discord.Color.blue()
+            title=f"{guild.name} Information",
+            description=f"Created {format_dt(guild.created_at, style='R')}",
+            color=guild.owner.color if guild.owner and guild.owner.color.value else discord.Color.blurple()
         )
+
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
-        embed.add_field(name="Server Name", value=guild.name, inline=True)
-        embed.add_field(name="Server ID", value=guild.id, inline=True)
-        embed.add_field(name="Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
-        created_at = int(guild.created_at.timestamp())
-        embed.add_field(name="Created", value=f"<t:{created_at}:F> (<t:{created_at}:R>)", inline=False)
-        total_members = guild.member_count
-        online_members = sum(1 for member in guild.members if member.status != discord.Status.offline)
-        embed.add_field(name="Members", value=f"Total: {total_members}\nOnline: {online_members}", inline=True)
-        text_channels = len(guild.text_channels)
-        voice_channels = len(guild.voice_channels)
-        categories = len(guild.categories)
-        embed.add_field(name="Channels", value=f"Text: {text_channels}\nVoice: {voice_channels}\nCategories: {categories}", inline=True)
-        embed.add_field(name="Roles", value=len(guild.roles), inline=True)
-        embed.add_field(name="Boost Level", value=f"Level {guild.premium_tier}", inline=True)
-        embed.add_field(name="Boosts", value=guild.premium_subscription_count or 0, inline=True)
-        if guild.features:
-            features = [feature.replace('_', ' ').title() for feature in guild.features]
-            features_text = ", ".join(features) if len(", ".join(features)) <= 1024 else f"{len(features)} features"
-            embed.add_field(name="Features", value=features_text, inline=False)
-        await interaction.response.send_message(embed=embed)
+        
+        if guild.banner:
+            embed.set_image(url=guild.banner.url)
 
+        # Core Information
+        core_info = [
+            f"👑 Owner: {guild.owner.mention if guild.owner else 'Unknown'}",
+            f"🆔 ID: {guild.id}",
+            f"🌍 Region: {str(guild.preferred_locale).replace('-', ' ').title()}",
+            f"💫 Vanity URL: {guild.vanity_url_code or 'None'}"
+        ]
+        embed.add_field(name="Server Info", value="\n".join(core_info), inline=False)
+
+        # Member Stats
+        member_info = [
+            f"👥 Total: {total_members:,}",
+            f"👤 Humans: {member_stats['humans']:,}",
+            f"🤖 Bots: {member_stats['bots']:,}",
+            "",
+            "**Status Distribution:**",
+            f"🟢 Online: {member_stats['online']:,}",
+            f"🟡 Idle: {member_stats['idle']:,}",
+            f"🔴 DND: {member_stats['dnd']:,}",
+            f"⚫ Offline: {member_stats['offline']:,}"
+        ]
+        embed.add_field(
+            name="Member Stats", 
+            value="\n".join(member_info),
+            inline=True
+        )
+
+        # Channel Stats
+        channel_info = [
+            f"💬 Text: {channels['text']:,}",
+            f"🔊 Voice: {channels['voice']:,}",
+            f"🎭 Stage: {channels['stage']:,}",
+            f"📋 Forums: {channels['forum']:,}",
+            f"📑 Categories: {channels['category']:,}",
+            f"📝 Total: {len(guild.channels):,}"
+        ]
+        embed.add_field(
+            name="Channel Stats",
+            value="\n".join(channel_info),
+            inline=True
+        )
+
+        # Role Info
+        role_info = [
+            f"📊 Total: {roles['total']:,}",
+            f"⚙️ Managed: {roles['managed']:,}",
+            f"📋 Hoisted: {roles['hoisted']:,}",
+            f"🎨 Colored: {roles['colored']:,}"
+        ]
+        embed.add_field(name="Role Info", value="\n".join(role_info), inline=True)
+
+        # Security Settings
+        security = [
+            f"🔒 Verification: {str(guild.verification_level).replace('_', ' ').title()}",
+            f"🛡️ Content Filter: {str(guild.explicit_content_filter).replace('_', ' ').title()}",
+            f"📢 Notifications: {str(guild.default_notifications.name).replace('_', ' ').title()}"
+        ]
+        embed.add_field(name="Security", value="\n".join(security), inline=False)
+
+        # Footer Stats
+        footer_stats = []
+        footer_stats.append(f"{len(guild.emojis):,} Emojis")
+        if hasattr(guild, "stickers"):
+            footer_stats.append(f"{len(guild.stickers):,} Stickers")
+        
+        # Count members in voice channels
+        in_voice = sum(1 for m in guild.members if m.voice)
+        footer_stats.append(f"{in_voice:,} In Voice")
+        
+        embed.set_footer(text=" • ".join(footer_stats))
+
+        await interaction.response.send_message(embed=embed)
     # =========================
     # Status lists (who is Online/Idle/DND/Offline)
     # =========================
@@ -904,55 +1013,87 @@ class UtilityCog(commands.Cog):
             body += f"\n…and {extra} more"
         return body
 
-    @app_commands.command(name="status", description="Show who is Online/Idle/DND/Offline (optionally filter).")
-    @app_commands.describe(status="Optional filter: online | idle | dnd | offline")
+    @app_commands.command(name="status", description="Show who is Online/Idle/DND/Offline")
+    @app_commands.describe(status="Filter by status: online, idle, dnd, offline")
+    @app_commands.choices(status=[
+        app_commands.Choice(name="Online", value="online"),
+        app_commands.Choice(name="Idle", value="idle"),
+        app_commands.Choice(name="Do Not Disturb", value="dnd"),
+        app_commands.Choice(name="Offline", value="offline")
+    ])
     async def status(self, interaction: discord.Interaction, status: Optional[str] = None):
+        """Show member status lists with optional filtering."""
         guild = interaction.guild
         if not guild:
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
 
-        online = [m for m in guild.members if m.status == discord.Status.online]
-        idle = [m for m in guild.members if m.status == discord.Status.idle]
-        dnd = [m for m in guild.members if m.status == discord.Status.dnd]
-        offline = [m for m in guild.members if m.status == discord.Status.offline]
+        # Quick member status count
+        status_counts = {"online": 0, "idle": 0, "dnd": 0, "offline": 0}
+        status_members = {"online": [], "idle": [], "dnd": [], "offline": []}
+        
+        for member in guild.members:
+            if member.bot:
+                continue
+            status_key = str(member.status)
+            if status_key in status_counts:
+                status_counts[status_key] += 1
+                status_members[status_key].append(member)
 
-        def filter_bots(lst: List[discord.Member]) -> List[discord.Member]:
-            return [m for m in lst if not m.bot]
+        embed = discord.Embed(
+            title=f"{guild.name} Member Status",
+            color=discord.Color.blurple()
+        )
+        
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
 
-        e = discord.Embed(title=f"{guild.name} Presence", color=discord.Color.blurple())
-        e.set_thumbnail(url=guild.icon.url if guild.icon else None)
+        # Status emojis
+        emojis = {
+            "online": "🟢",
+            "idle": "🟡",
+            "dnd": "🔴",
+            "offline": "⚫"
+        }
 
-        warn = ""
-        if not self._presence_enabled(guild):
-            warn = "\n\n_Heads up: Presence Intent is not enabled — lists may be incomplete. Enable `Server Members Intent` and `Presence Intent` in the Dev Portal and set `intents.presences = True` in your code._"
-
+        # Show filtered or all statuses
         if status:
-            key = status.lower().strip()
-            mapping = {
-                "online": ("\U0001F7E2 Online", online),
-                "idle": ("\U0001F7E1 Idle", idle),
-                "dnd": ("\U0001F534 Do Not Disturb", dnd),
-                "offline": ("\u26AB Offline", offline),
-            }
-            if key not in mapping:
-                await interaction.response.send_message("❌ Invalid status. Use: online, idle, dnd, offline.", ephemeral=True)
-                return
-            label, lst = mapping[key]
-            humans = filter_bots(lst)
-            e.add_field(name=f"{label} ({len(lst)})", value=self._format_member_list(humans), inline=False)
-            if warn:
-                e.description = warn
-            await interaction.response.send_message(embed=e)
-            return
+            key = status.lower()
+            if key in status_counts:
+                members = status_members[key]
+                names = [m.display_name for m in members[:20]]
+                value = "\n".join(f"• {name}" for name in names)
+                if len(members) > 20:
+                    value += f"\n... and {len(members) - 20} more"
+                if not value:
+                    value = "_None_"
+                    
+                embed.add_field(
+                    name=f"{emojis[key]} {key.title()} ({len(members)})",
+                    value=value,
+                    inline=False
+                )
+        else:
+            for status_key in ["online", "idle", "dnd", "offline"]:
+                members = status_members[status_key]
+                if members:
+                    names = [m.display_name for m in members[:10]]
+                    value = "\n".join(f"• {name}" for name in names)
+                    if len(members) > 10:
+                        value += f"\n... and {len(members) - 10} more"
+                else:
+                    value = "_None_"
+                
+                embed.add_field(
+                    name=f"{emojis[status_key]} {status_key.title()} ({len(members)})",
+                    value=value,
+                    inline=True if status_key in ["online", "idle"] else False
+                )
 
-        e.add_field(name=f"\U0001F7E2 Online ({len(online)})", value=self._format_member_list(filter_bots(online)), inline=False)
-        e.add_field(name=f"\U0001F7E1 Idle ({len(idle)})", value=self._format_member_list(filter_bots(idle)), inline=False)
-        e.add_field(name=f"\U0001F534 DND ({len(dnd)})", value=self._format_member_list(filter_bots(dnd)), inline=False)
-        e.add_field(name=f"\u26AB Offline ({len(offline)})", value=self._format_member_list(filter_bots(offline)), inline=False)
-        if warn:
-            e.description = warn
-        await interaction.response.send_message(embed=e)
+        total = sum(status_counts.values())
+        embed.set_footer(text=f"Total Members (excluding bots): {total}")
+
+        await interaction.response.send_message(embed=embed)
 
     @commands.command(name="status")
     async def prefix_status(self, ctx, status: Optional[str] = None):
