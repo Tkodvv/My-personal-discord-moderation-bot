@@ -693,18 +693,13 @@ class AdminCog(commands.Cog):
             await ctx.send("❌ You don't have permission to manage nicknames.", ephemeral=True)
             return
 
-        # Check if trying to change bot's nickname
-        if member == ctx.guild.me:
-            await ctx.send("❌ I cannot change my own nickname through this command.", ephemeral=True)
-            return
-
-        # Check role hierarchy for members (bots can't have higher roles than the command user)
-        if member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
+        # Check role hierarchy for members (skip for bot's own nickname)
+        if member != ctx.guild.me and member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
             await ctx.send("❌ You cannot change the nickname of someone with a higher or equal role.", ephemeral=True)
             return
 
-        # Check if bot has permission to change this member's nickname
-        if member.top_role >= ctx.guild.me.top_role:
+        # Check if bot has permission to change this member's nickname (skip for bot's own nickname)
+        if member != ctx.guild.me and member.top_role >= ctx.guild.me.top_role:
             await ctx.send("❌ I cannot change the nickname of someone with a higher or equal role than me.", ephemeral=True)
             return
 
@@ -735,6 +730,72 @@ class AdminCog(commands.Cog):
             await ctx.send("❌ I don't have permission to manage nicknames.", ephemeral=True)
         except Exception as e:
             await ctx.send(f"❌ Failed to change nickname: {e}", ephemeral=True)
+
+    # =========================================================
+    # SETPREFIX COMMANDS (Hybrid)
+    # =========================================================
+
+    @commands.hybrid_command(name="setprefix", description="Change the bot's command prefix")
+    @app_commands.describe(prefix="The new prefix to use (1-3 characters)")
+    @commands.guild_only()
+    async def setprefix(self, ctx: commands.Context, prefix: str):
+        """Change the bot's command prefix."""
+        # Delete command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+        # Check if this is a guild context
+        if not isinstance(ctx.author, discord.Member):
+            await ctx.send("❌ This command can only be used in a server.", ephemeral=True)
+            return
+
+        # Check permissions
+        has_role = any((role_check.id in self.allowed_say_roles) for role_check in ctx.author.roles)
+        if not has_role and not ctx.author.guild_permissions.manage_guild:
+            await ctx.send("❌ You need **Manage Server** permission or the allowed roles to change the prefix.", ephemeral=True)
+            return
+
+        # Validate prefix
+        if len(prefix) > 3:
+            await ctx.send("❌ Prefix must be 3 characters or less.", ephemeral=True)
+            return
+        
+        if len(prefix.strip()) == 0:
+            await ctx.send("❌ Prefix cannot be empty or only whitespace.", ephemeral=True)
+            return
+
+        # Check for problematic prefixes
+        if prefix in ["@", "<@", "`", "```"]:
+            await ctx.send("❌ This prefix could cause conflicts with Discord features.", ephemeral=True)
+            return
+
+        try:
+            # Update the bot's prefix (this is a simple implementation)
+            old_prefix = self.bot._text_prefix
+            self.bot._text_prefix = prefix
+            
+            embed = discord.Embed(
+                title="✅ Prefix Changed",
+                description=f"Bot prefix changed from `{old_prefix}` to `{prefix}`\n\nYou can now use commands like `{prefix}ping` or `{prefix}help`",
+                color=discord.Color.green()
+            )
+            embed.add_field(
+                name="📝 Note", 
+                value="Slash commands (/) will still work as before!", 
+                inline=False
+            )
+            embed.set_footer(text=f"Changed by {ctx.author.display_name}")
+            
+            await ctx.send(embed=embed)
+            
+            # Log the action
+            self.logger.info(f"Prefix changed from '{old_prefix}' to '{prefix}' by {ctx.author} in {ctx.guild.name}")
+            
+        except Exception as e:
+            await ctx.send(f"❌ Failed to change prefix: {e}", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))
