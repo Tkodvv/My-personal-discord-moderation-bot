@@ -144,7 +144,7 @@ class UtilityCog(commands.Cog):
             except (discord.NotFound, discord.Forbidden):
                 pass
         
-        uptime_duration = utcnow() - self.bot.start_time
+        uptime_duration = utcnow() - self.bot.boot_time
         days = uptime_duration.days
         hours, remainder = divmod(uptime_duration.seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
@@ -282,18 +282,31 @@ class UtilityCog(commands.Cog):
             color=target.color,
             timestamp=utcnow()
         )
+
+        # Prefer GIF for animated avatars
+        if target.display_avatar.is_animated():
+            avatar_url = target.display_avatar.replace(format='gif', size=avatar_size).url
+            embed.set_image(url=avatar_url)
+            embed.add_field(
+                name="Links",
+                value=f"[GIF]({avatar_url}) | [PNG]({target.display_avatar.replace(format='png', size=avatar_size).url}) | "
+                      f"[JPG]({target.display_avatar.replace(format='jpg', size=avatar_size).url}) | "
+                      f"[WEBP]({target.display_avatar.replace(format='webp', size=avatar_size).url})",
+                inline=False
+            )
+        else:
+            avatar_url = target.display_avatar.replace(size=avatar_size).url
+            embed.set_image(url=avatar_url)
+            embed.add_field(
+                name="Links",
+                value=f"[PNG]({target.display_avatar.replace(format='png', size=avatar_size).url}) | "
+                      f"[JPG]({target.display_avatar.replace(format='jpg', size=avatar_size).url}) | "
+                      f"[WEBP]({target.display_avatar.replace(format='webp', size=avatar_size).url})",
+                inline=False
+            )
         
-        avatar_url = target.display_avatar.replace(size=avatar_size).url
-        embed.set_image(url=avatar_url)
-        embed.add_field(
-            name="Links",
-            value=f"[PNG]({target.display_avatar.replace(format='png', size=avatar_size).url}) | "
-                  f"[JPG]({target.display_avatar.replace(format='jpg', size=avatar_size).url}) | "
-                  f"[WEBP]({target.display_avatar.replace(format='webp', size=avatar_size).url})" +
-                  (f" | [GIF]({target.display_avatar.replace(format='gif', size=avatar_size).url})" if target.display_avatar.is_animated() else ""),
-            inline=False
-        )
-        
+        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="av", description="Get a user's avatar (short version)", aliases=["pfp"])
@@ -316,21 +329,29 @@ class UtilityCog(commands.Cog):
         valid_formats = ["png", "jpg", "jpeg", "webp", "gif"]
         img_format = format.lower() if format.lower() in valid_formats else "png"
         
-        # Get avatar URL in specified format
-        if img_format == "gif" and not target.display_avatar.is_animated():
-            img_format = "png"  # Fallback for non-animated avatars
+        # Prefer GIF for animated avatars if available
+        if target.display_avatar.is_animated():
+            avatar_url = target.display_avatar.replace(format='gif', size=1024).url
+            embed = discord.Embed(
+                title=f"{target.display_name}'s Avatar (GIF)",
+                color=target.color,
+                url=avatar_url
+            )
+            embed.set_image(url=avatar_url)
+        else:
+            # Get avatar URL in specified format
+            if img_format == "gif":
+                img_format = "png"  # Fallback for non-animated avatars
+            avatar_url = target.display_avatar.replace(format=img_format, size=1024).url
+            embed = discord.Embed(
+                title=f"{target.display_name}'s Avatar ({img_format.upper()})",
+                color=target.color,
+                url=avatar_url
+            )
+            embed.set_image(url=avatar_url)
         
-        avatar_url = target.display_avatar.replace(format=img_format, size=1024).url
-        
-        embed = discord.Embed(
-            title=f"{target.display_name}'s Avatar ({img_format.upper()})",
-            color=target.color,
-            url=avatar_url
-        )
-        
-        embed.set_image(url=avatar_url)
         embed.set_footer(text=f"Requested by {ctx.author.display_name}")
-        
+
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="cat", description="Get random cat images (1-5)")

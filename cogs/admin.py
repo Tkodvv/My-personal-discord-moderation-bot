@@ -150,8 +150,55 @@ class AdminCog(commands.Cog):
             # Don't add cookie to embed - will be shown via button
             cookie = alt_data.get("cookie")
             
-            if user_id := alt_data.get("userId"):
+            # Try to get user ID and avatar from Roblox API using username
+            avatar_url = None
+            user_id = None
+            
+            if username := (alt_data.get("username") or alt_data.get("name")):
+                embed.add_field(name="� Username", value=f"`{username}`", inline=True)
+                
+                # Try to get user ID from Roblox API using username
+                try:
+                    import aiohttp
+                    self.logger.info(f"Fetching user ID for username: {username}")
+                    async with aiohttp.ClientSession() as session:
+                        # Get user ID from username
+                        async with session.post("https://users.roblox.com/v1/usernames/users", 
+                                              json={"usernames": [username]}) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                if data.get("data") and len(data["data"]) > 0:
+                                    user_id = data["data"][0].get("id")
+                                    self.logger.info(f"Found user ID: {user_id}")
+                                    
+                                    # Now get avatar using user ID
+                                    if user_id:
+                                        async with session.get(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=420x420&format=Png&isCircular=false") as avatar_resp:
+                                            if avatar_resp.status == 200:
+                                                avatar_data = await avatar_resp.json()
+                                                if avatar_data.get("data") and len(avatar_data["data"]) > 0:
+                                                    avatar_url = avatar_data["data"][0].get("imageUrl")
+                                                    self.logger.info(f"Found avatar URL: {avatar_url}")
+                                            else:
+                                                self.logger.warning(f"Avatar API returned status {avatar_resp.status}")
+                            else:
+                                self.logger.warning(f"Username API returned status {resp.status}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch Roblox user info: {e}")
+            
+            # Add User ID field if we found it
+            if user_id:
                 embed.add_field(name="🔢 User ID", value=f"`{user_id}`", inline=True)
+
+            # Set avatar image if we got one
+            if avatar_url:
+                embed.set_thumbnail(url=avatar_url)
+                self.logger.info("Set avatar thumbnail in embed")
+            elif alt_data.get("avatarUrl"):  # Fallback to TRIGEN avatar if available
+                embed.set_thumbnail(url=alt_data.get("avatarUrl"))
+                self.logger.info("Used TRIGEN avatar URL")
+            else:
+                self.logger.warning("No avatar URL available")
 
             # Try to parse creation date
             if created_at := alt_data.get("createdAt"):
@@ -171,9 +218,6 @@ class AdminCog(commands.Cog):
                             continue
                 except Exception:
                     pass
-
-            if avatar_url := alt_data.get("avatarUrl"):
-                embed.set_thumbnail(url=avatar_url)
 
             embed.set_footer(text="⚠️ You must change the password to keep the account!")
 
@@ -618,6 +662,79 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message("❌ I don't have permission to manage roles.", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"❌ Failed to add role: {e}", ephemeral=True)
+
+    # =========================================================
+    # SETNICK COMMANDS (Hybrid)
+    # =========================================================
+
+    @commands.hybrid_command(name="setnick", description="Change a member's nickname")
+    @app_commands.describe(
+        member="The member whose nickname to change",
+        nickname="The new nickname (leave empty to remove nickname)"
+    )
+    @commands.guild_only()
+    async def setnick(self, ctx: commands.Context, member: discord.Member, *, nickname: Optional[str] = None):
+        """Change a member's nickname."""
+        # Delete command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+        # Check if this is a guild context
+        if not isinstance(ctx.author, discord.Member):
+            await ctx.send("❌ This command can only be used in a server.", ephemeral=True)
+            return
+
+        # Check permissions
+        has_role = any((role_check.id in self.allowed_say_roles) for role_check in ctx.author.roles)
+        if not has_role and not ctx.author.guild_permissions.manage_nicknames:
+            await ctx.send("❌ You don't have permission to manage nicknames.", ephemeral=True)
+            return
+
+        # Check if trying to change bot's nickname
+        if member == ctx.guild.me:
+            await ctx.send("❌ I cannot change my own nickname through this command.", ephemeral=True)
+            return
+
+        # Check role hierarchy for members (bots can't have higher roles than the command user)
+        if member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
+            await ctx.send("❌ You cannot change the nickname of someone with a higher or equal role.", ephemeral=True)
+            return
+
+        # Check if bot has permission to change this member's nickname
+        if member.top_role >= ctx.guild.me.top_role:
+            await ctx.send("❌ I cannot change the nickname of someone with a higher or equal role than me.", ephemeral=True)
+            return
+
+        try:
+            old_nick = member.display_name
+            await member.edit(nick=nickname)
+            
+            if nickname:
+                embed = discord.Embed(
+                    title="✅ Nickname Changed",
+                    description=f"Changed {member.mention}'s nickname from **{old_nick}** to **{nickname}**",
+                    color=discord.Color.green()
+                )
+            else:
+                embed = discord.Embed(
+                    title="✅ Nickname Removed",
+                    description=f"Removed {member.mention}'s nickname (was **{old_nick}**)",
+                    color=discord.Color.green()
+                )
+            
+            embed.set_footer(text=f"Changed by {ctx.author.display_name}")
+            await ctx.send(embed=embed, allowed_mentions=self.no_pings)
+            
+            # Log the action
+            self.logger.info(f"Nickname changed for {member} by {ctx.author} in {ctx.guild.name}: '{old_nick}' -> '{nickname}'")
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to manage nicknames.", ephemeral=True)
+        except Exception as e:
+            await ctx.send(f"❌ Failed to change nickname: {e}", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))
