@@ -6,6 +6,7 @@ Contains the main bot class with event handlers and cog loading.
 import logging
 import json
 import os
+import asyncio
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -104,11 +105,9 @@ class DiscordBot(commands.Bot):
                 # Process the command
                 await self.invoke(ctx)
                 
-                # Try to delete the command message
-                try:
-                    await message.delete()
-                except (discord.NotFound, discord.Forbidden):
-                    pass  # Message already deleted or no permissions
+                # Don't auto-delete here since individual commands handle their own deletion
+                # This prevents the 404 Not Found error when trying to delete twice
+                
             except Exception as e:
                 self.logger.error(f"Command processing error: {e}", exc_info=True)
         else:

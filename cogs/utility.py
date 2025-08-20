@@ -124,13 +124,27 @@ class UtilityCog(commands.Cog):
     @commands.hybrid_command(name="ping", description="Check bot's latency")
     async def ping(self, ctx: commands.Context):
         """Check the bot's latency."""
+        # Delete command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+        
         latency = round(self.bot.latency * 1000)
         await ctx.send(f"🏓 Pong! Latency: {latency}ms")
 
     @commands.hybrid_command(name="uptime", description="Check bot's uptime")
     async def uptime(self, ctx: commands.Context):
         """Check the bot's uptime."""
-        uptime_duration = utcnow() - self.start_time
+        # Delete command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+        
+        uptime_duration = utcnow() - self.bot.start_time
         days = uptime_duration.days
         hours, remainder = divmod(uptime_duration.seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
@@ -149,6 +163,13 @@ class UtilityCog(commands.Cog):
     @app_commands.describe(user="User to get info about")
     async def userinfo(self, ctx: commands.Context, user: Optional[discord.Member] = None):
         """Get information about a user."""
+        # Delete command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+        
         target = user or ctx.author
         
         embed = discord.Embed(
@@ -187,6 +208,13 @@ class UtilityCog(commands.Cog):
     @commands.hybrid_command(name="serverinfo", description="Get information about this server")
     async def serverinfo(self, ctx: commands.Context):
         """Get information about the server."""
+        # Delete command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+        
         guild = ctx.guild
         if not guild:
             await ctx.send("❌ This command can only be used in a server.", ephemeral=True)
@@ -230,25 +258,78 @@ class UtilityCog(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="avatar", description="Get a user's avatar")
-    @app_commands.describe(user="User to get avatar of")
-    async def avatar(self, ctx: commands.Context, user: Optional[discord.Member] = None):
+    @app_commands.describe(
+        user="User to get avatar of",
+        size="Avatar size (16, 32, 64, 128, 256, 512, 1024, 2048, 4096) - default: 1024"
+    )
+    async def avatar(self, ctx: commands.Context, user: Optional[discord.Member] = None, size: Optional[int] = 1024):
         """Get a user's avatar."""
+        # Delete command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+        
         target = user or ctx.author
         
+        # Validate size
+        valid_sizes = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+        avatar_size = size if size in valid_sizes else 1024
+        
         embed = discord.Embed(
-            title=f"{target.display_name}'s Avatar",
+            title=f"{target.display_name}'s Avatar ({avatar_size}x{avatar_size})",
             color=target.color,
             timestamp=utcnow()
         )
         
-        embed.set_image(url=target.display_avatar.url)
+        avatar_url = target.display_avatar.replace(size=avatar_size).url
+        embed.set_image(url=avatar_url)
         embed.add_field(
             name="Links",
-            value=f"[PNG]({target.display_avatar.replace(format='png').url}) | "
-                  f"[JPG]({target.display_avatar.replace(format='jpg').url}) | "
-                  f"[WEBP]({target.display_avatar.replace(format='webp').url})",
+            value=f"[PNG]({target.display_avatar.replace(format='png', size=avatar_size).url}) | "
+                  f"[JPG]({target.display_avatar.replace(format='jpg', size=avatar_size).url}) | "
+                  f"[WEBP]({target.display_avatar.replace(format='webp', size=avatar_size).url})" +
+                  (f" | [GIF]({target.display_avatar.replace(format='gif', size=avatar_size).url})" if target.display_avatar.is_animated() else ""),
             inline=False
         )
+        
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="av", description="Get a user's avatar (short version)", aliases=["pfp"])
+    @app_commands.describe(
+        user="User to get avatar of",
+        format="Image format (png, jpg, webp, gif) - default: png"
+    )
+    async def av(self, ctx: commands.Context, user: Optional[discord.Member] = None, format: Optional[str] = "png"):
+        """Get a user's avatar (short version with format option)."""
+        # Delete command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+        
+        target = user or ctx.author
+        
+        # Validate format
+        valid_formats = ["png", "jpg", "jpeg", "webp", "gif"]
+        img_format = format.lower() if format.lower() in valid_formats else "png"
+        
+        # Get avatar URL in specified format
+        if img_format == "gif" and not target.display_avatar.is_animated():
+            img_format = "png"  # Fallback for non-animated avatars
+        
+        avatar_url = target.display_avatar.replace(format=img_format, size=1024).url
+        
+        embed = discord.Embed(
+            title=f"{target.display_name}'s Avatar ({img_format.upper()})",
+            color=target.color,
+            url=avatar_url
+        )
+        
+        embed.set_image(url=avatar_url)
+        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
         
         await ctx.send(embed=embed)
 
@@ -257,6 +338,13 @@ class UtilityCog(commands.Cog):
     @app_commands.describe(count="How many cats to fetch (1-5)")
     async def cat(self, ctx: commands.Context, count: Optional[int] = 1):
         """Get random cat images (1-5)."""
+        # Delete command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+        
         # Validate count parameter
         n = max(1, min(int(count or 1), 5))
         
@@ -275,16 +363,11 @@ class UtilityCog(commands.Cog):
                     if response.status == 200:
                         data = await response.json()
                         if data and isinstance(data, list):
-                            # Create embed for each cat
+                            # Send clean cat images without embeds
                             for item in data:
                                 cat_url = item.get("url")
                                 if cat_url:
-                                    embed = discord.Embed(
-                                        title="🐱 Random Cat",
-                                        color=discord.Color.orange()
-                                    )
-                                    embed.set_image(url=cat_url)
-                                    await ctx.send(embed=embed)
+                                    await ctx.send(cat_url)  # Send only the image URL for cleaner look
                                     if len(data) > 1:
                                         await asyncio.sleep(0.5)  # Small delay between multiple cats
                             return
@@ -301,6 +384,13 @@ class UtilityCog(commands.Cog):
     @commands.cooldown(1, 5.0, commands.BucketType.user)
     async def dog(self, ctx: commands.Context):
         """Get a random dog image."""
+        # Delete command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+        
         if ctx.interaction:
             await ctx.defer()
 

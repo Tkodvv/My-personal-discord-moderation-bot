@@ -7,6 +7,7 @@ Contains administrative commands and bot management features.
 import os
 import json
 import asyncio
+import io
 from datetime import datetime
 import discord
 from discord.ext import commands
@@ -21,6 +22,35 @@ except ImportError:
     async def get_alt_public():
         return None
 
+
+class CookieView(discord.ui.View):
+    """View with button to show cookie."""
+    
+    def __init__(self, cookie: str, timeout: float = 300):
+        super().__init__(timeout=timeout)
+        self.cookie = cookie
+        
+    @discord.ui.button(label="🍪 Show Cookie", style=discord.ButtonStyle.secondary, emoji="🍪")
+    async def show_cookie(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show the cookie when button is clicked."""
+        
+        # Create cookie embed with the entire cookie in description
+        cookie_embed = discord.Embed(
+            title="🍪 Account Cookie",
+            description=f"**⚠️ Keep this cookie safe and do not share it with anyone!**\n\n```\n{self.cookie}\n```",
+            color=0x2F3136
+        )
+            
+        cookie_embed.set_footer(text="This cookie expires when you change your password.")
+        
+        await interaction.response.send_message(embed=cookie_embed, ephemeral=True)
+        
+    async def on_timeout(self):
+        """Disable all buttons when view times out."""
+        for item in self.children:
+            item.disabled = True
+
+
 class AdminCog(commands.Cog):
     """Administrative commands and bot management."""
 
@@ -28,6 +58,13 @@ class AdminCog(commands.Cog):
         self.bot = bot
         self.logger = logging.getLogger(__name__)
         self.no_pings = discord.AllowedMentions.none()
+        
+        # Allowed roles for /say command
+        self.allowed_say_roles = {
+            1383421890403762286,
+            1349191381310111824,
+            1379755293797384202,
+        }
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -109,9 +146,10 @@ class AdminCog(commands.Cog):
             if password := alt_data.get("password"):
                 if os.getenv("ALT_SHOW_PASSWORD", "true").lower() in {"1", "true", "yes", "y"}:
                     embed.add_field(name="🔒 Password", value=f"`{password}`", inline=True)
-            if cookie := alt_data.get("cookie"):
-                # Show full cookie value
-                embed.add_field(name="🍪 Cookie", value=f"`{cookie}`", inline=False)
+            
+            # Don't add cookie to embed - will be shown via button
+            cookie = alt_data.get("cookie")
+            
             if user_id := alt_data.get("userId"):
                 embed.add_field(name="🔢 User ID", value=f"`{user_id}`", inline=True)
 
@@ -141,7 +179,10 @@ class AdminCog(commands.Cog):
 
             # Try to send DM
             try:
-                await ctx.author.send(embed=embed)
+                # Create view with cookie button if cookie exists
+                view = CookieView(cookie) if cookie else None
+                
+                await ctx.author.send(embed=embed, view=view)
                 # Send public success message
                 public_embed = discord.Embed(
                     title="🎉 Roblox Account Generated!",
@@ -379,6 +420,204 @@ class AdminCog(commands.Cog):
         """Check if member has any alt-whitelisted roles."""
         allowed_roles = self._get_alt_role_ids(member.guild.id)
         return any(role.id in allowed_roles for role in member.roles)
+
+    # =========================================================
+    # SAY COMMANDS
+    # =========================================================
+
+    @commands.command(name="say")
+    async def prefix_say(self, ctx, *, message: str):
+        """Make the bot say something (prefix version)"""
+        if not isinstance(ctx.author, discord.Member):
+            return
+        
+        # Check permissions
+        has_role = any((role.id in self.allowed_say_roles) for role in ctx.author.roles)
+        if not has_role:
+            await ctx.message.delete()
+            response = await ctx.send("❌ You don't have access to this command.")
+            await response.delete(delay=5)
+            return
+            
+        try:
+            # Delete command message
+            await ctx.message.delete()
+            
+            # Send the message
+            allowed = discord.AllowedMentions(everyone=False, users=True, roles=True)
+            await ctx.channel.send(content=message, allowed_mentions=allowed)
+            self.logger.info(f"Say command used by {ctx.author} in {ctx.guild.name}")
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to send messages here.")
+        except Exception as e:
+            await ctx.send(f"❌ Failed to send: {e}")
+
+    @app_commands.command(name="say", description="Make the bot say something (and send attached images/files).")
+    @app_commands.describe(
+        message="What should I say? (can be empty if only sending files)",
+        channel="Channel to send to (default: here)",
+        file1="Attach image/file (optional)",
+        file2="Attach image/file (optional)",
+        file3="Attach image/file (optional)",
+        file4="Attach image/file (optional)",
+        file5="Attach image/file (optional)",
+    )
+    @app_commands.guild_only()
+    async def say(
+        self,
+        interaction: discord.Interaction,
+        message: str = "",
+        channel: Optional[discord.TextChannel] = None,
+        file1: Optional[discord.Attachment] = None,
+        file2: Optional[discord.Attachment] = None,
+        file3: Optional[discord.Attachment] = None,
+        file4: Optional[discord.Attachment] = None,
+        file5: Optional[discord.Attachment] = None,
+    ):
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+
+        has_role = any((role.id in self.allowed_say_roles) for role in interaction.user.roles)
+        if not has_role:
+            await interaction.response.send_message("❌ You don't have access to `/say`.", ephemeral=True)
+            return
+
+        target = channel or interaction.channel
+
+        atts = [a for a in (file1, file2, file3, file4, file5) if a is not None]
+        files: list[discord.File] = []
+        for a in atts:
+            try:
+                data = await a.read()
+                files.append(discord.File(io.BytesIO(data), filename=a.filename))
+            except Exception:
+                pass
+
+        content = message.strip() or None
+        if not content and not files:
+            await interaction.response.send_message("❌ Nothing to send. Add text or attach at least one file.", ephemeral=True)
+            return
+
+        self.logger.info(f"Say command used by {interaction.user} in {interaction.guild.name}")
+
+        try:
+            allowed = discord.AllowedMentions(everyone=False, users=True, roles=True)
+            await target.send(content=content, files=files or None, allowed_mentions=allowed)
+            await interaction.response.send_message("✅ Message sent!", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ I don't have permission to send messages in that channel.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed to send: {e}", ephemeral=True)
+
+    # =========================================================
+    # ROLE MANAGEMENT COMMANDS
+    # =========================================================
+
+    @commands.command(name="addrole", aliases=["giverole"])
+    async def prefix_addrole(self, ctx, member: discord.Member, *, role: discord.Role):
+        """Add a role to a member (prefix version)"""
+        if not isinstance(ctx.author, discord.Member):
+            return
+        
+        # Check permissions
+        has_role = any((role_check.id in self.allowed_say_roles) for role_check in ctx.author.roles)
+        if not has_role and not ctx.author.guild_permissions.manage_roles:
+            await ctx.message.delete()
+            response = await ctx.send("❌ You don't have permission to manage roles.")
+            await response.delete(delay=5)
+            return
+            
+        try:
+            # Delete command message
+            await ctx.message.delete()
+            
+            # Check if member already has the role
+            if role in member.roles:
+                response = await ctx.send(f"❌ {member.display_name} already has the {role.name} role.")
+                await response.delete(delay=5)
+                return
+            
+            # Check role hierarchy
+            if role >= ctx.guild.me.top_role:
+                response = await ctx.send(f"❌ I cannot manage the {role.name} role due to role hierarchy.")
+                await response.delete(delay=5)
+                return
+            
+            if ctx.author != ctx.guild.owner and role >= ctx.author.top_role:
+                response = await ctx.send(f"❌ You cannot assign the {role.name} role due to role hierarchy.")
+                await response.delete(delay=5)
+                return
+            
+            # Add the role
+            await member.add_roles(role, reason=f"Role added by {ctx.author}")
+            
+            # Send success message
+            embed = discord.Embed(
+                description=f"✅ Successfully added **{role.name}** role to {member.mention}",
+                color=discord.Color.green()
+            )
+            await ctx.send(embed=embed, delete_after=10)
+            self.logger.info(f"Role {role.name} added to {member} by {ctx.author} in {ctx.guild.name}")
+            
+        except discord.Forbidden:
+            response = await ctx.send("❌ I don't have permission to manage roles.")
+            await response.delete(delay=5)
+        except Exception as e:
+            response = await ctx.send(f"❌ Failed to add role: {e}")
+            await response.delete(delay=5)
+
+    @app_commands.command(name="addrole", description="Add a role to a member")
+    @app_commands.describe(
+        member="The member to give the role to",
+        role="The role to add"
+    )
+    @app_commands.guild_only()
+    async def addrole(self, interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+        """Add a role to a member (slash version)"""
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+
+        # Check permissions
+        has_role = any((role_check.id in self.allowed_say_roles) for role_check in interaction.user.roles)
+        if not has_role and not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ You don't have permission to manage roles.", ephemeral=True)
+            return
+
+        # Check if member already has the role
+        if role in member.roles:
+            await interaction.response.send_message(f"❌ {member.display_name} already has the **{role.name}** role.", ephemeral=True)
+            return
+        
+        # Check role hierarchy
+        if role >= interaction.guild.me.top_role:
+            await interaction.response.send_message(f"❌ I cannot manage the **{role.name}** role due to role hierarchy.", ephemeral=True)
+            return
+        
+        if interaction.user != interaction.guild.owner and role >= interaction.user.top_role:
+            await interaction.response.send_message(f"❌ You cannot assign the **{role.name}** role due to role hierarchy.", ephemeral=True)
+            return
+
+        try:
+            # Add the role
+            await member.add_roles(role, reason=f"Role added by {interaction.user}")
+            
+            # Send success message
+            embed = discord.Embed(
+                description=f"✅ Successfully added **{role.name}** role to {member.mention}",
+                color=discord.Color.green()
+            )
+            embed.set_footer(text=f"Added by {interaction.user.display_name}")
+            
+            await interaction.response.send_message(embed=embed)
+            self.logger.info(f"Role {role.name} added to {member} by {interaction.user} in {interaction.guild.name}")
+            
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ I don't have permission to manage roles.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed to add role: {e}", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))
