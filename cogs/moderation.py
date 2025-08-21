@@ -96,47 +96,109 @@ class ModerationCog(commands.Cog):
             await interaction.response.send_message("❌ I don't have permission to kick this member.", ephemeral=True)
 
     # Ban
-    @app_commands.command(name="ban", description="Ban a member from the server")
+    @app_commands.command(name="ban", description="Ban a member or user from the server")
     @app_commands.describe(
-        member="The member to ban",
+        target="The member/user to ban (mention, ID, or username)",
         reason="Reason for the ban",
         delete_messages="Number of days of messages to delete (0-7)"
     )
-    async def ban(self, interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided", delete_messages: Optional[int] = 0):
+    async def ban(self, interaction: discord.Interaction, target: str, reason: Optional[str] = "No reason provided", delete_messages: Optional[int] = 0):
         if delete_messages is not None and (delete_messages < 0 or delete_messages > 7):
             return await interaction.response.send_message("❌ Delete messages must be between 0 and 7 days.", ephemeral=True)
         if not interaction.guild:
             return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
         if not isinstance(interaction.user, discord.Member):
             return await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
-        if not has_moderation_permissions(interaction.user, member):
-            return await interaction.response.send_message("❌ You don't have permission to ban this member.", ephemeral=True)
-        if not has_higher_role(interaction.guild.me, member):
-            return await interaction.response.send_message("❌ I cannot ban this member due to role hierarchy.", ephemeral=True)
-
-        # DM best-effort
+        
+        # Try to resolve the target (member, user ID, or fetch user)
+        member = None
+        user = None
+        user_id = None
+        
+        # First, try to convert target to member if they're in the server
         try:
-            dm = discord.Embed(
-                title=f"You were banned from {interaction.guild.name}",
-                description=f"***Reason:*** {reason}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            if interaction.guild.icon:
-                dm.set_thumbnail(url=interaction.guild.icon.url)
-            await member.send(embed=dm)
-        except Exception:
+            # Try to get member by mention or ID
+            if target.startswith('<@') and target.endswith('>'):
+                user_id = int(target.strip('<@!>'))
+            elif target.isdigit():
+                user_id = int(target)
+            else:
+                # Try to find member by username/display name
+                for m in interaction.guild.members:
+                    if m.name.lower() == target.lower() or m.display_name.lower() == target.lower():
+                        member = m
+                        break
+            
+            if user_id and not member:
+                member = interaction.guild.get_member(user_id)
+            
+        except ValueError:
             pass
+        
+        # If we found a member, do permission checks
+        if member:
+            if not has_moderation_permissions(interaction.user, member):
+                return await interaction.response.send_message("❌ You don't have permission to ban this member.", ephemeral=True)
+            if not has_higher_role(interaction.guild.me, member):
+                return await interaction.response.send_message("❌ I cannot ban this member due to role hierarchy.", ephemeral=True)
+            user = member
+        else:
+            # User not in server, try to fetch user object
+            if not user_id:
+                return await interaction.response.send_message("❌ Could not find that user. Please provide a valid user ID, mention, or username of someone in the server.", ephemeral=True)
+            
+            # Check if user has ban permissions for hackbans
+            if not interaction.user.guild_permissions.ban_members:
+                return await interaction.response.send_message("❌ You need ban permissions to ban users not in the server.", ephemeral=True)
+            
+            try:
+                user = await self.bot.fetch_user(user_id)
+            except discord.NotFound:
+                return await interaction.response.send_message("❌ User not found.", ephemeral=True)
+            except discord.HTTPException:
+                return await interaction.response.send_message("❌ Failed to fetch user information.", ephemeral=True)
+
+        # Check if user is already banned
+        try:
+            ban_entry = await interaction.guild.fetch_ban(user)
+            return await interaction.response.send_message(f"❌ {user.mention} is already banned.", ephemeral=True)
+        except discord.NotFound:
+            pass  # User is not banned, continue
+        except discord.Forbidden:
+            return await interaction.response.send_message("❌ I don't have permission to check bans.", ephemeral=True)
+
+        # Try to DM the user (best effort)
+        if member:  # Only try to DM if they're in the server
+            try:
+                dm = discord.Embed(
+                    title=f"You were banned from {interaction.guild.name}",
+                    description=f"***Reason:*** {reason}",
+                    color=discord.Color.red(),
+                    timestamp=discord.utils.utcnow()
+                )
+                if interaction.guild.icon:
+                    dm.set_thumbnail(url=interaction.guild.icon.url)
+                await user.send(embed=dm)
+            except Exception:
+                pass
 
         try:
-            await member.ban(reason=f"Banned by staff: {reason}", delete_message_days=delete_messages or 0)
-            e = self._dyno_style_embed("banned", member, reason)
+            await interaction.guild.ban(user, reason=f"Banned by {interaction.user}: {reason}", delete_message_days=delete_messages or 0)
+            
+            # Create success embed
+            ban_type = "banned" if member else "hackbanned"
+            e = self._dyno_style_embed(ban_type, user, reason)
             if delete_messages:
                 e.description += f"\n***Messages Deleted:*** {delete_messages} day(s)"
-            e.set_footer(text=f"User ID: {member.id}")
+            if not member:
+                e.description += f"\n***Type:*** Hackban (user not in server)"
+            e.set_footer(text=f"User ID: {user.id}")
             await interaction.response.send_message(embed=e)
+            
         except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to ban this member.", ephemeral=True)
+            await interaction.response.send_message("❌ I don't have permission to ban this user.", ephemeral=True)
+        except discord.HTTPException as e:
+            await interaction.response.send_message(f"❌ Failed to ban user: {e}", ephemeral=True)
 
     # Timeout
     @app_commands.command(name="timeout", description="Timeout a member")
@@ -451,35 +513,106 @@ class ModerationCog(commands.Cog):
             await ctx.send("❌ I don't have permission to kick this member.", delete_after=5)
 
     @commands.command(name="ban")
-    async def prefix_ban(self, ctx, member: discord.Member, *, reason="No reason provided"):
+    async def prefix_ban(self, ctx, target, *, reason="No reason provided"):
         await self.delete_command_message(ctx)
         if not isinstance(ctx.author, discord.Member) or not ctx.guild:
             return
-        if not has_moderation_permissions(ctx.author, member):
-            return await ctx.send("❌ You don't have permission to ban this member.", delete_after=5)
-        if not has_higher_role(ctx.guild.me, member):
-            return await ctx.send("❌ I cannot ban this member due to role hierarchy.", delete_after=5)
-
+        
+        # Try to resolve the target (member, user ID, or fetch user)
+        member = None
+        user = None
+        user_id = None
+        
+        # First, try to convert target to member if they're in the server
         try:
-            dm = discord.Embed(
-                title=f"You were banned from {ctx.guild.name}",
-                description=f"***Reason:*** {reason}",
-                color=discord.Color.green(),
-                timestamp=discord.utils.utcnow()
-            )
-            if ctx.guild.icon:
-                dm.set_thumbnail(url=ctx.guild.icon.url)
-            await member.send(embed=dm)
-        except Exception:
-            pass
+            # Try member converter first
+            try:
+                member_converter = commands.MemberConverter()
+                member = await member_converter.convert(ctx, target)
+                user = member
+            except commands.BadArgument:
+                # Try to parse as user ID
+                if target.isdigit():
+                    user_id = int(target)
+                elif target.startswith('<@') and target.endswith('>'):
+                    user_id = int(target.strip('<@!>'))
+                else:
+                    # Try to find member by username/display name
+                    for m in ctx.guild.members:
+                        if m.name.lower() == target.lower() or m.display_name.lower() == target.lower():
+                            member = m
+                            user = member
+                            break
+                    
+                    if not member:
+                        return await ctx.send("❌ Could not find that user. Please provide a valid user ID, mention, or username.", delete_after=5)
+                
+                # If we have a user ID but no member, try to fetch the user
+                if user_id and not member:
+                    member = ctx.guild.get_member(user_id)
+                    if member:
+                        user = member
+                    else:
+                        # User not in server, check permissions for hackban
+                        if not ctx.author.guild_permissions.ban_members:
+                            return await ctx.send("❌ You need ban permissions to ban users not in the server.", delete_after=5)
+                        
+                        try:
+                            user = await self.bot.fetch_user(user_id)
+                        except discord.NotFound:
+                            return await ctx.send("❌ User not found.", delete_after=5)
+                        except discord.HTTPException:
+                            return await ctx.send("❌ Failed to fetch user information.", delete_after=5)
+                            
+        except ValueError:
+            return await ctx.send("❌ Invalid user ID provided.", delete_after=5)
+        
+        # Permission checks for members in server
+        if member:
+            if not has_moderation_permissions(ctx.author, member):
+                return await ctx.send("❌ You don't have permission to ban this member.", delete_after=5)
+            if not has_higher_role(ctx.guild.me, member):
+                return await ctx.send("❌ I cannot ban this member due to role hierarchy.", delete_after=5)
 
+        # Check if user is already banned
         try:
-            await member.ban(reason=f"Banned by staff: {reason}")
-            e = self._dyno_style_embed("banned", member, reason)
-            e.set_footer(text=f"User ID: {member.id}")
-            await ctx.send(embed=e)
+            ban_entry = await ctx.guild.fetch_ban(user)
+            return await ctx.send(f"❌ {user.mention} is already banned.", delete_after=5)
+        except discord.NotFound:
+            pass  # User is not banned, continue
         except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to ban this member.", delete_after=5)
+            return await ctx.send("❌ I don't have permission to check bans.", delete_after=5)
+
+        # Try to DM the user (best effort, only if they're in server)
+        if member:
+            try:
+                dm = discord.Embed(
+                    title=f"You were banned from {ctx.guild.name}",
+                    description=f"***Reason:*** {reason}",
+                    color=discord.Color.red(),
+                    timestamp=discord.utils.utcnow()
+                )
+                if ctx.guild.icon:
+                    dm.set_thumbnail(url=ctx.guild.icon.url)
+                await user.send(embed=dm)
+            except Exception:
+                pass
+
+        try:
+            await ctx.guild.ban(user, reason=f"Banned by {ctx.author}: {reason}")
+            
+            # Create success embed
+            ban_type = "banned" if member else "hackbanned"
+            e = self._dyno_style_embed(ban_type, user, reason)
+            if not member:
+                e.description += f"\n***Type:*** Hackban (user not in server)"
+            e.set_footer(text=f"User ID: {user.id}")
+            await ctx.send(embed=e)
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to ban this user.", delete_after=5)
+        except discord.HTTPException as e:
+            await ctx.send(f"❌ Failed to ban user: {e}", delete_after=5)
 
     @commands.command(name="timeout")
     async def prefix_timeout(self, ctx, member: discord.Member, minutes: int, *, reason="No reason provided"):

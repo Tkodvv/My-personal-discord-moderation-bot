@@ -713,6 +713,10 @@ class UtilityCog(commands.Cog):
     @app_commands.describe(count="How many cats to fetch (1-5)")
     async def cat(self, ctx: commands.Context, count: Optional[int] = 1):
         """Get random cat images (1-5)."""
+        # For slash commands, respond silently first
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+        
         # Delete command message for prefix commands
         if not ctx.interaction:
             try:
@@ -722,10 +726,6 @@ class UtilityCog(commands.Cog):
         
         # Validate count parameter
         n = max(1, min(int(count or 1), 5))
-        
-        # Defer for slash commands that might take time
-        if ctx.interaction:
-            await ctx.defer()
 
         api_key = os.getenv("CAT_API_KEY")
         url = "https://api.thecatapi.com/v1/images/search"
@@ -738,22 +738,66 @@ class UtilityCog(commands.Cog):
                     if response.status == 200:
                         data = await response.json()
                         if data and isinstance(data, list):
-                            # Send clean cat images without embeds
-                            for item in data:
-                                cat_url = item.get("url")
-                                if cat_url:
-                                    await ctx.send(cat_url)  # Send only the image URL for cleaner look
-                                    if len(data) > 1:
-                                        await asyncio.sleep(0.5)  # Small delay between multiple cats
+                            # Use webhook for silent sending
+                            try:
+                                webhooks = await ctx.channel.webhooks()
+                                webhook = None
+                                
+                                # Look for existing bot webhook
+                                for wh in webhooks:
+                                    if wh.name == "Silent Cat Bot":
+                                        webhook = wh
+                                        break
+                                
+                                # Create webhook if none exists
+                                if webhook is None:
+                                    webhook = await ctx.channel.create_webhook(name="Silent Cat Bot")
+                                
+                                # Send cat images through webhook (completely silent)
+                                for item in data:
+                                    cat_url = item.get("url")
+                                    if cat_url:
+                                        await webhook.send(
+                                            content=cat_url,
+                                            username=ctx.bot.user.display_name,
+                                            avatar_url=ctx.bot.user.display_avatar.url
+                                        )
+                                        if len(data) > 1:
+                                            await asyncio.sleep(0.5)  # Small delay between multiple cats
+                                
+                                # Send confirmation only for slash commands
+                                if ctx.interaction:
+                                    await ctx.interaction.followup.send(f"🐱 Sent {n} cat{'s' if n > 1 else ''}!", ephemeral=True)
+                                
+                            except discord.Forbidden:
+                                # Fallback to normal send if webhook fails
+                                for item in data:
+                                    cat_url = item.get("url")
+                                    if cat_url:
+                                        await ctx.send(cat_url)  # Send only the image URL for cleaner look
+                                        if len(data) > 1:
+                                            await asyncio.sleep(0.5)  # Small delay between multiple cats
                             return
                     else:
-                        await ctx.send(f"❌ Cat API error: HTTP {response.status}", ephemeral=True)
+                        error_msg = f"❌ Cat API error: HTTP {response.status}"
+                        if ctx.interaction:
+                            await ctx.interaction.followup.send(error_msg, ephemeral=True)
+                        else:
+                            await ctx.send(error_msg, ephemeral=True)
                         return
 
         except asyncio.TimeoutError:
-            await ctx.send("❌ Cat API request timed out. Please try again later!", ephemeral=True)
+            error_msg = "❌ Cat API request timed out. Please try again later!"
+            if ctx.interaction:
+                await ctx.interaction.followup.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, ephemeral=True)
         except Exception as e:
-            await ctx.send(f"❌ Failed to fetch cats: {str(e)}", ephemeral=True)
+            error_msg = f"❌ Failed to fetch cats: {str(e)}"
+            if ctx.interaction:
+                await ctx.interaction.followup.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, ephemeral=True)
 
     @commands.hybrid_command(name="dog", description="Get a random dog image")
     @commands.cooldown(1, 5.0, commands.BucketType.user)

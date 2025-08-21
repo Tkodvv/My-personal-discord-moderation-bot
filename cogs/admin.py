@@ -141,11 +141,12 @@ class AdminCog(commands.Cog):
                 color=0x2F3136
             )
             
+            # Add username and password in a clean layout
             if username := (alt_data.get("username") or alt_data.get("name")):
-                embed.add_field(name="👤 Username", value=f"`{username}`", inline=True)
+                embed.add_field(name="👤 Username", value=f"```{username}```", inline=True)
             if password := alt_data.get("password"):
                 if os.getenv("ALT_SHOW_PASSWORD", "true").lower() in {"1", "true", "yes", "y"}:
-                    embed.add_field(name="🔒 Password", value=f"`{password}`", inline=True)
+                    embed.add_field(name="🔒 Password", value=f"```{password}```", inline=True)
             
             # Don't add cookie to embed - will be shown via button
             cookie = alt_data.get("cookie")
@@ -155,8 +156,6 @@ class AdminCog(commands.Cog):
             user_id = None
             
             if username := (alt_data.get("username") or alt_data.get("name")):
-                embed.add_field(name="� Username", value=f"`{username}`", inline=True)
-                
                 # Try to get user ID from Roblox API using username
                 try:
                     import aiohttp
@@ -188,7 +187,7 @@ class AdminCog(commands.Cog):
             
             # Add User ID field if we found it
             if user_id:
-                embed.add_field(name="🔢 User ID", value=f"`{user_id}`", inline=True)
+                embed.add_field(name="🆔 User ID", value=str(user_id), inline=True)
 
             # Set avatar image if we got one
             if avatar_url:
@@ -200,8 +199,34 @@ class AdminCog(commands.Cog):
             else:
                 self.logger.warning("No avatar URL available")
 
-            # Try to parse creation date
-            if created_at := alt_data.get("createdAt"):
+            # Fetch actual Roblox account creation date
+            creation_date_added = False
+            if user_id:
+                try:
+                    import aiohttp
+                    self.logger.info(f"Fetching creation date for user ID: {user_id}")
+                    async with aiohttp.ClientSession() as session:
+                        # Get user details including creation date from Roblox API
+                        async with session.get(f"https://users.roblox.com/v1/users/{user_id}") as resp:
+                            if resp.status == 200:
+                                user_data = await resp.json()
+                                created_date = user_data.get("created")
+                                if created_date:
+                                    try:
+                                        # Parse the Roblox creation date format
+                                        parsed_date = datetime.strptime(created_date, "%Y-%m-%dT%H:%M:%S.%fZ")
+                                        embed.add_field(name="📅 Creation Date", value=parsed_date.strftime('%m/%d/%Y'), inline=True)
+                                        creation_date_added = True
+                                        self.logger.info(f"Found creation date: {parsed_date.strftime('%m/%d/%Y')}")
+                                    except ValueError as e:
+                                        self.logger.warning(f"Failed to parse creation date: {e}")
+                            else:
+                                self.logger.warning(f"User details API returned status {resp.status}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch Roblox creation date: {e}")
+            
+            # Try to parse creation date from TRIGEN if Roblox API failed
+            if not creation_date_added and (created_at := alt_data.get("createdAt")):
                 try:
                     date_formats = [
                         "%Y-%m-%dT%H:%M:%S.%fZ",
@@ -212,12 +237,18 @@ class AdminCog(commands.Cog):
                     for fmt in date_formats:
                         try:
                             parsed_date = datetime.strptime(created_at, fmt)
-                            embed.add_field(name="📅 Creation Date", value=f"`{parsed_date.strftime('%m/%d/%Y')}`", inline=True)
+                            embed.add_field(name="📅 Creation Date", value=parsed_date.strftime('%m/%d/%Y'), inline=True)
+                            creation_date_added = True
                             break
                         except ValueError:
                             continue
                 except Exception:
                     pass
+            
+            # If no creation date from either API, use current date as fallback
+            if not creation_date_added:
+                current_date = datetime.now().strftime('%m/%d/%Y')
+                embed.add_field(name="📅 Creation Date", value=current_date, inline=True)
 
             embed.set_footer(text="⚠️ You must change the password to keep the account!")
 
@@ -241,6 +272,20 @@ class AdminCog(commands.Cog):
 
         except commands.CommandOnCooldown as e:
             await ctx.send(f"⏰ Slow down! Try again in {e.retry_after:.1f}s", ephemeral=True)
+        except RuntimeError as e:
+            if str(e) == "TOKENS_EXHAUSTED":
+                error_embed = discord.Embed(
+                    title="🪙 API Tokens Exhausted",
+                    description="❌ **The API has no tokens left!**\n\nPlease contact the bot administrator to refill the token balance.",
+                    color=0xFF6B6B,
+                    timestamp=discord.utils.utcnow()
+                )
+                error_embed.set_footer(text="TRIGEN API • Token Balance: 0")
+                await ctx.send(embed=error_embed, ephemeral=True)
+                self.logger.warning("TRIGEN API tokens exhausted")
+            else:
+                self.logger.error(f"Alt generation failed: {e}")
+                await ctx.send("❌ An unexpected error occurred. Please try again later.", ephemeral=True)
         except Exception as e:
             self.logger.error(f"Alt generation failed: {e}")
             await ctx.send("❌ An unexpected error occurred. Please try again later.", ephemeral=True)

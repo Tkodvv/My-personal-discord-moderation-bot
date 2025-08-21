@@ -24,8 +24,26 @@ async def get_alt_public():
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.get(url, headers=headers)  # Use GET instead of POST (fixes 405 error)
+        
+        # Check for token exhaustion or quota exceeded
+        if r.status_code == 402:  # Payment Required - usually means quota exceeded
+            raise RuntimeError("TOKENS_EXHAUSTED")
+        elif r.status_code == 429:  # Too Many Requests - rate limit/quota
+            raise RuntimeError("TOKENS_EXHAUSTED")
+        elif r.status_code == 403:  # Forbidden - could be invalid API key or no tokens
+            response_text = r.text.lower()
+            if any(phrase in response_text for phrase in ["quota", "token", "limit", "exceeded", "insufficient"]):
+                raise RuntimeError("TOKENS_EXHAUSTED")
+        
         r.raise_for_status()
         data = r.json()  # Return raw data from TRIGEN API
+        
+        # Check if the response indicates no tokens/quota in the data
+        if isinstance(data, dict):
+            error_msg = data.get("error", "").lower()
+            message = data.get("message", "").lower()
+            if any(phrase in error_msg or phrase in message for phrase in ["quota", "token", "limit", "exceeded", "insufficient", "balance"]):
+                raise RuntimeError("TOKENS_EXHAUSTED")
 
     # Return the complete data from TRIGEN API
     return data
