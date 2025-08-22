@@ -437,6 +437,136 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message("ℹ️ That role wasn't on the mod list.", ephemeral=True)
 
     # =========================================================
+    # ENHANCED MOD WHITELIST COMMANDS (Hybrid - Users & Roles)
+    # =========================================================
+
+    @commands.hybrid_command(name="addmod", description="Add a user or role to mod whitelist")
+    @app_commands.describe(target="User or role to add mod permissions to")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def add_mod(self, ctx: commands.Context, target: Union[discord.Member, discord.Role]):
+        """Add a user or role to the mod whitelist for all bot commands (except alt)."""
+        if isinstance(target, discord.Role):
+            # Add role to mod whitelist
+            self.bot.add_mod_role(ctx.guild.id, target.id)
+            embed = discord.Embed(
+                title="✅ Mod Role Added",
+                description=f"**{target.mention}** now has access to all bot commands (except alt generation).",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(
+                name="📋 Permissions Granted",
+                value="• All moderation commands\n• All utility commands\n• Admin commands (if admin)\n• ❌ Alt generation (excluded)",
+                inline=False
+            )
+            embed.set_footer(text=f"Added by {ctx.author.display_name}")
+            
+        elif isinstance(target, discord.Member):
+            # Add user to mod whitelist via role system (we'll add them to a special mod role)
+            # For now, we'll use the existing role-based system and provide guidance
+            embed = discord.Embed(
+                title="ℹ️ User Mod Access",
+                description=f"To give **{target.mention}** mod permissions, please:\n\n1. Create or use a mod role\n2. Assign that role to the user\n3. Use `/addmod @role` to add the role to the whitelist",
+                color=discord.Color.blue(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(
+                name="💡 Tip",
+                value="This role-based system provides better permission management and can be applied to multiple users at once.",
+                inline=False
+            )
+        
+        await ctx.send(embed=embed, ephemeral=True)
+
+    @commands.hybrid_command(name="removemod", description="Remove a user or role from mod whitelist")
+    @app_commands.describe(target="User or role to remove mod permissions from")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def remove_mod(self, ctx: commands.Context, target: Union[discord.Member, discord.Role]):
+        """Remove a user or role from the mod whitelist."""
+        if isinstance(target, discord.Role):
+            # Remove role from mod whitelist
+            removed = self.bot.remove_mod_role(ctx.guild.id, target.id)
+            if removed:
+                embed = discord.Embed(
+                    title="✅ Mod Role Removed",
+                    description=f"**{target.mention}** no longer has mod access to bot commands.",
+                    color=discord.Color.red(),
+                    timestamp=discord.utils.utcnow()
+                )
+                embed.add_field(
+                    name="📋 Permissions Revoked",
+                    value="• All moderation commands\n• All utility commands\n• Admin commands (unless admin)",
+                    inline=False
+                )
+                embed.set_footer(text=f"Removed by {ctx.author.display_name}")
+            else:
+                embed = discord.Embed(
+                    title="ℹ️ Role Not Found",
+                    description=f"**{target.mention}** wasn't in the mod whitelist.",
+                    color=discord.Color.orange()
+                )
+                
+        elif isinstance(target, discord.Member):
+            embed = discord.Embed(
+                title="ℹ️ User Mod Removal",
+                description=f"To remove **{target.mention}** mod permissions:\n\n1. Remove their mod role(s)\n2. Or use `/removemod @role` to remove the role from whitelist",
+                color=discord.Color.blue(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(
+                name="💡 Current Method",
+                value="The bot uses role-based permissions. Remove the user from mod roles or remove roles from the whitelist.",
+                inline=False
+            )
+        
+        await ctx.send(embed=embed, ephemeral=True)
+
+    @commands.hybrid_command(name="listmods", description="List all mod roles and their permissions")
+    @commands.guild_only() 
+    @commands.has_permissions(administrator=True)
+    async def list_mods(self, ctx: commands.Context):
+        """List all roles with mod permissions."""
+        mod_roles = self.bot.mod_whitelist.get(str(ctx.guild.id), [])
+        
+        if not mod_roles:
+            embed = discord.Embed(
+                title="📋 Mod Whitelist",
+                description="No roles are currently whitelisted for mod commands.",
+                color=discord.Color.blue()
+            )
+            embed.add_field(
+                name="💡 Get Started",
+                value="Use `/addmod @role` to give a role access to all bot commands (except alt generation).",
+                inline=False
+            )
+        else:
+            role_list = []
+            for role_id in mod_roles:
+                role = ctx.guild.get_role(role_id)
+                if role:
+                    member_count = len(role.members)
+                    role_list.append(f"• {role.mention} ({member_count} members)")
+                else:
+                    role_list.append(f"• ~~Deleted Role~~ (ID: {role_id})")
+            
+            embed = discord.Embed(
+                title="📋 Mod Whitelist",
+                description=f"**{len(mod_roles)} role(s)** have mod permissions:\n\n" + "\n".join(role_list),
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(
+                name="🔑 Permissions Included",
+                value="• All moderation commands (ban, kick, timeout, etc.)\n• All utility commands\n• Admin commands (if user has admin perms)\n• ❌ Alt generation (excluded for security)",
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Server: {ctx.guild.name}")
+        await ctx.send(embed=embed, ephemeral=True)
+
+    # =========================================================
     # BLACKLIST COMMANDS
     # =========================================================
 
@@ -708,6 +838,148 @@ class AdminCog(commands.Cog):
         except Exception as e:
             await interaction.response.send_message(f"❌ Failed to add role: {e}", ephemeral=True)
 
+    @commands.command(name="removerole", aliases=["takerole"])
+    async def prefix_removerole(self, ctx, member: discord.Member,
+                                *, role: discord.Role):
+        """Remove a role from a member (prefix version)"""
+        if not isinstance(ctx.author, discord.Member):
+            return
+
+        # Check permissions
+        has_role = any((role_check.id in self.allowed_say_roles)
+                       for role_check in ctx.author.roles)
+        if not has_role and not ctx.author.guild_permissions.manage_roles:
+            await ctx.message.delete()
+            response = await ctx.send(
+                "❌ You don't have permission to manage roles.")
+            await response.delete(delay=5)
+            return
+
+        try:
+            # Delete command message
+            await ctx.message.delete()
+
+            # Check if member doesn't have the role
+            if role not in member.roles:
+                response = await ctx.send(
+                    f"❌ {member.display_name} doesn't have "
+                    f"the {role.name} role.")
+                await response.delete(delay=5)
+                return
+
+            # Check role hierarchy
+            if role >= ctx.guild.me.top_role:
+                response = await ctx.send(
+                    f"❌ I cannot manage the {role.name} role "
+                    f"due to role hierarchy.")
+                await response.delete(delay=5)
+                return
+
+            if (ctx.author != ctx.guild.owner and
+                    role >= ctx.author.top_role):
+                response = await ctx.send(
+                    f"❌ You cannot remove the {role.name} role "
+                    f"due to role hierarchy.")
+                await response.delete(delay=5)
+                return
+
+            # Remove the role
+            await member.remove_roles(
+                role, reason=f"Role removed by {ctx.author}")
+
+            # Send success message
+            embed = discord.Embed(
+                description=(f"✅ Successfully removed **{role.name}** "
+                             f"role from {member.mention}"),
+                color=discord.Color.green()
+            )
+            await ctx.send(embed=embed, delete_after=10)
+            self.logger.info(
+                f"Role {role.name} removed from {member} by {ctx.author} "
+                f"in {ctx.guild.name}")
+
+        except discord.Forbidden:
+            response = await ctx.send(
+                "❌ I don't have permission to manage roles.")
+            await response.delete(delay=5)
+        except Exception as e:
+            response = await ctx.send(f"❌ Failed to remove role: {e}")
+            await response.delete(delay=5)
+
+    @app_commands.command(name="removerole",
+                          description="Remove a role from a member")
+    @app_commands.describe(
+        member="The member to remove the role from",
+        role="The role to remove"
+    )
+    @app_commands.guild_only()
+    async def removerole(self, interaction: discord.Interaction,
+                         member: discord.Member, role: discord.Role):
+        """Remove a role from a member (slash version)"""
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "❌ This command can only be used in a server.",
+                ephemeral=True)
+            return
+
+        # Check permissions
+        has_role = any((role_check.id in self.allowed_say_roles)
+                       for role_check in interaction.user.roles)
+        if (not has_role and
+                not interaction.user.guild_permissions.manage_roles):
+            await interaction.response.send_message(
+                "❌ You don't have permission to manage roles.",
+                ephemeral=True)
+            return
+
+        # Check if member doesn't have the role
+        if role not in member.roles:
+            await interaction.response.send_message(
+                f"❌ {member.display_name} doesn't have "
+                f"the **{role.name}** role.", ephemeral=True)
+            return
+
+        # Check role hierarchy
+        if role >= interaction.guild.me.top_role:
+            await interaction.response.send_message(
+                f"❌ I cannot manage the **{role.name}** role "
+                f"due to role hierarchy.", ephemeral=True)
+            return
+
+        if (interaction.user != interaction.guild.owner and
+                role >= interaction.user.top_role):
+            await interaction.response.send_message(
+                f"❌ You cannot remove the **{role.name}** role "
+                f"due to role hierarchy.", ephemeral=True)
+            return
+
+        try:
+            # Remove the role
+            await member.remove_roles(
+                role, reason=f"Role removed by {interaction.user}")
+
+            # Send success message
+            embed = discord.Embed(
+                description=(f"✅ Successfully removed **{role.name}** "
+                             f"role from {member.mention}"),
+                color=discord.Color.green()
+            )
+            embed.set_footer(
+                text=f"Removed by {interaction.user.display_name}")
+
+            await interaction.response.send_message(embed=embed)
+            self.logger.info(
+                f"Role {role.name} removed from {member} by "
+                f"{interaction.user} in {interaction.guild.name}")
+
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ I don't have permission to manage roles.",
+                ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Failed to remove role: {e}", ephemeral=True)
+
     # =========================================================
     # SETNICK COMMANDS (Hybrid)
     # =========================================================
@@ -841,6 +1113,51 @@ class AdminCog(commands.Cog):
             
         except Exception as e:
             await ctx.send(f"❌ Failed to change prefix: {e}", ephemeral=True)
+
+    # =========================================================
+    # DM COMMAND
+    # =========================================================
+
+    @commands.hybrid_command(
+        name="dm",
+        description="Send a direct message to a user"
+    )
+    @commands.has_permissions(manage_messages=True)
+    async def dm(self, ctx, user: discord.User, *, message: str):
+        """Send a direct message to a user."""
+        try:
+            # Send the DM
+            await user.send(message)
+            
+            # Simple success message
+            await ctx.send(
+                f"✅ Direct message sent to {user.display_name}!",
+                ephemeral=True
+            )
+            
+            # Log the action
+            self.logger.info(
+                "DM sent to %s by %s in %s: %s",
+                user,
+                ctx.author,
+                ctx.guild.name,
+                message
+            )
+            
+        except discord.Forbidden:
+            await ctx.send(
+                f"❌ Could not send DM to {user.display_name}. "
+                "They may have DMs disabled or blocked the bot.",
+                ephemeral=True
+            )
+            
+        except discord.HTTPException as e:
+            await ctx.send(
+                f"❌ Failed to send DM to {user.display_name}: {e}",
+                ephemeral=True
+            )
+            self.logger.error("Failed to send DM to %s: %s", user, e)
+
 
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))

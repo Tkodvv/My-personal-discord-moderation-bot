@@ -8,6 +8,7 @@ import logging
 import re
 import discord
 from discord.ext import commands
+from discord.ext.commands import MemberNotFound  # Used in exception handling
 from discord import app_commands
 from datetime import timedelta
 from typing import Optional
@@ -530,7 +531,8 @@ class ModerationCog(commands.Cog):
                 member_converter = commands.MemberConverter()
                 member = await member_converter.convert(ctx, target)
                 user = member
-            except commands.BadArgument:
+            except (commands.BadArgument, MemberNotFound):
+                # Member converter failed, try other methods
                 # Try to parse as user ID
                 if target.isdigit():
                     user_id = int(target)
@@ -539,13 +541,17 @@ class ModerationCog(commands.Cog):
                 else:
                     # Try to find member by username/display name
                     for m in ctx.guild.members:
-                        if m.name.lower() == target.lower() or m.display_name.lower() == target.lower():
+                        if (m.name.lower() == target.lower() or 
+                            m.display_name.lower() == target.lower()):
                             member = m
                             user = member
                             break
                     
-                    if not member:
-                        return await ctx.send("❌ Could not find that user. Please provide a valid user ID, mention, or username.", delete_after=5)
+                    if not member and not user_id:
+                        return await ctx.send(
+                            "❌ Could not find that user. Please provide a "
+                            "valid user ID, mention, or username.", 
+                            delete_after=5)
                 
                 # If we have a user ID but no member, try to fetch the user
                 if user_id and not member:
@@ -555,33 +561,49 @@ class ModerationCog(commands.Cog):
                     else:
                         # User not in server, check permissions for hackban
                         if not ctx.author.guild_permissions.ban_members:
-                            return await ctx.send("❌ You need ban permissions to ban users not in the server.", delete_after=5)
+                            return await ctx.send(
+                                "❌ You need ban permissions to ban users "
+                                "not in the server.", delete_after=5)
                         
                         try:
                             user = await self.bot.fetch_user(user_id)
                         except discord.NotFound:
-                            return await ctx.send("❌ User not found.", delete_after=5)
+                            return await ctx.send(
+                                "❌ User not found.", delete_after=5)
                         except discord.HTTPException:
-                            return await ctx.send("❌ Failed to fetch user information.", delete_after=5)
+                            return await ctx.send(
+                                "❌ Failed to fetch user information.", 
+                                delete_after=5)
                             
         except ValueError:
             return await ctx.send("❌ Invalid user ID provided.", delete_after=5)
         
+        # Ensure we have a user object at this point
+        if not user:
+            return await ctx.send(
+                "❌ Could not resolve user. Please try again.", delete_after=5)
+        
         # Permission checks for members in server
         if member:
             if not has_moderation_permissions(ctx.author, member):
-                return await ctx.send("❌ You don't have permission to ban this member.", delete_after=5)
+                return await ctx.send(
+                    "❌ You don't have permission to ban this member.",
+                    delete_after=5)
             if not has_higher_role(ctx.guild.me, member):
-                return await ctx.send("❌ I cannot ban this member due to role hierarchy.", delete_after=5)
+                return await ctx.send(
+                    "❌ I cannot ban this member due to role hierarchy.",
+                    delete_after=5)
 
         # Check if user is already banned
         try:
-            ban_entry = await ctx.guild.fetch_ban(user)
-            return await ctx.send(f"❌ {user.mention} is already banned.", delete_after=5)
+            await ctx.guild.fetch_ban(user)
+            return await ctx.send(
+                f"❌ {user.mention} is already banned.", delete_after=5)
         except discord.NotFound:
             pass  # User is not banned, continue
         except discord.Forbidden:
-            return await ctx.send("❌ I don't have permission to check bans.", delete_after=5)
+            return await ctx.send(
+                "❌ I don't have permission to check bans.", delete_after=5)
 
         # Try to DM the user (best effort, only if they're in server)
         if member:
@@ -599,18 +621,20 @@ class ModerationCog(commands.Cog):
                 pass
 
         try:
-            await ctx.guild.ban(user, reason=f"Banned by {ctx.author}: {reason}")
+            await ctx.guild.ban(
+                user, reason=f"Banned by {ctx.author}: {reason}")
             
             # Create success embed
             ban_type = "banned" if member else "hackbanned"
             e = self._dyno_style_embed(ban_type, user, reason)
             if not member:
-                e.description += f"\n***Type:*** Hackban (user not in server)"
+                e.description += "\n***Type:*** Hackban (user not in server)"
             e.set_footer(text=f"User ID: {user.id}")
             await ctx.send(embed=e)
             
         except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to ban this user.", delete_after=5)
+            await ctx.send(
+                "❌ I don't have permission to ban this user.", delete_after=5)
         except discord.HTTPException as e:
             await ctx.send(f"❌ Failed to ban user: {e}", delete_after=5)
 

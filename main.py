@@ -18,9 +18,14 @@ async def run_bot(discord_token: str):
     bot = DiscordBot()
     try:
         await bot.start(discord_token)
+    except asyncio.CancelledError:
+        # Handle graceful shutdown
+        pass
     finally:
         # avoids "Unclosed connector" if something blows up
-        await bot.close()
+        if not bot.is_closed():
+            await bot.close()
+
 
 def main():
     setup_logging()
@@ -36,9 +41,12 @@ def main():
         asyncio.run(run_bot(token))
     except KeyboardInterrupt:
         logger.info("Bot shutdown requested by user")
+    except asyncio.CancelledError:
+        logger.info("Bot task was cancelled")
     except Exception as e:
-        logger.error(f"Fatal error occurred: {e}")
+        logger.error("Fatal error occurred: %s", e)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

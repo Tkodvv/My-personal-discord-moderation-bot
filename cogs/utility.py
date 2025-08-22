@@ -9,6 +9,7 @@ import asyncio
 import aiohttp
 import discord
 from discord.ext import commands
+from discord.ext.commands import MemberNotFound
 from discord import app_commands
 from discord.utils import utcnow, format_dt
 from typing import Optional
@@ -513,9 +514,12 @@ class UtilityCog(commands.Cog):
         # Send the embed
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="userinfo", description="Get information about a user")
-    @app_commands.describe(user="User to get info about")
-    async def userinfo(self, ctx: commands.Context, user: Optional[discord.Member] = None):
+    @commands.hybrid_command(name="userinfo",
+                             description="Get information about a user")
+    @app_commands.describe(
+        user="User to get info about (mention, ID, or username)")
+    async def userinfo(self, ctx: commands.Context,
+                       user: Optional[str] = None):
         """Get information about a user."""
         # Delete command message for prefix commands
         if not ctx.interaction:
@@ -523,40 +527,120 @@ class UtilityCog(commands.Cog):
                 await ctx.message.delete()
             except (discord.NotFound, discord.Forbidden):
                 pass
-        
-        target = user or ctx.author
-        
+
+        # Determine target user
+        target = None
+        is_member = False
+
+        if user is None:
+            # Default to command author
+            target = ctx.author
+            is_member = isinstance(ctx.author, discord.Member)
+        else:
+            # Try to resolve the user
+            # First, try to get as member if they're in the server
+            try:
+                # Try member converter for users in server
+                member_converter = commands.MemberConverter()
+                target = await member_converter.convert(ctx, user)
+                is_member = True
+            except (commands.BadArgument, MemberNotFound):
+                # User not in server, try to get as user by ID
+                try:
+                    if user.isdigit():
+                        target = await self.bot.fetch_user(int(user))
+                        is_member = False
+                    elif user.startswith('<@') and user.endswith('>'):
+                        user_id = int(user.strip('<@!>'))
+                        target = await self.bot.fetch_user(user_id)
+                        is_member = False
+                    else:
+                        # Check if it's a username of someone in the server
+                        if ctx.guild:
+                            for member in ctx.guild.members:
+                                if (member.name.lower() == user.lower() or
+                                        member.display_name.lower() == user.lower()):
+                                    target = member
+                                    is_member = True
+                                    break
+
+                        if not target:
+                            error_msg = (
+                                "❌ User not found. Please provide a valid "
+                                "user mention, ID, or username of someone "
+                                "in this server.")
+                            if ctx.interaction:
+                                await ctx.send(error_msg, ephemeral=True)
+                            else:
+                                response = await ctx.send(error_msg)
+                                await response.delete(delay=5)
+                            return
+
+                except (discord.NotFound, discord.HTTPException, ValueError):
+                    error_msg = (
+                        "❌ User not found or unable to fetch user "
+                        "information.")
+                    if ctx.interaction:
+                        await ctx.send(error_msg, ephemeral=True)
+                    else:
+                        response = await ctx.send(error_msg)
+                        await response.delete(delay=5)
+                    return
+
+        if not target:
+            error_msg = "❌ Could not resolve user."
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                response = await ctx.send(error_msg)
+                await response.delete(delay=5)
+            return
+
+        # Create embed with user information
+        display_name = getattr(target, 'display_name', target.name)
         embed = discord.Embed(
-            title=f"User Info - {target.display_name}",
-            color=target.color,
+            title=f"User Info - {display_name}",
+            color=getattr(target, 'color', discord.Color.blue()),
             timestamp=utcnow()
         )
-        
+
         embed.set_thumbnail(url=target.display_avatar.url)
+
+        # Basic user info
+        display_name_value = getattr(target, 'display_name', target.name)
         embed.add_field(
             name="User Info",
             value=f"**Username:** {target}\n"
-                  f"**Display Name:** {target.display_name}\n"
+                  f"**Display Name:** {display_name_value}\n"
                   f"**ID:** {target.id}\n"
-                  f"**Bot:** {'Yes' if target.bot else 'No'}",
+                  f"**Bot:** {'Yes' if target.bot else 'No'}\n"
+                  f"**In Server:** {'Yes' if is_member else 'No'}",
             inline=True
         )
-        
+
+        # Date information
+        date_info = f"**Created:** {format_dt(target.created_at, 'R')}"
+        if is_member and hasattr(target, 'joined_at') and target.joined_at:
+            date_info += f"\n**Joined:** {format_dt(target.joined_at, 'R')}"
+        elif is_member:
+            date_info += "\n**Joined:** Unknown"
+
         embed.add_field(
             name="Dates",
-            value=f"**Created:** {format_dt(target.created_at, 'R')}\n"
-                  f"**Joined:** {format_dt(target.joined_at, 'R') if target.joined_at else 'Unknown'}",
+            value=date_info,
             inline=True
         )
-        
-        if target.roles[1:]:  # Exclude @everyone role
-            roles = [role.mention for role in target.roles[1:]]
+
+        # Role information (only for server members)
+        if is_member and hasattr(target, 'roles') and len(target.roles) > 1:
+            roles = [role.mention for role in target.roles[1:]]  # Exclude @everyone
+            role_text = " ".join(roles) if len(" ".join(roles)) <= 1024 else f"{len(roles)} roles"
             embed.add_field(
                 name=f"Roles ({len(roles)})",
-                value=" ".join(roles) if len(" ".join(roles)) <= 1024 else f"{len(roles)} roles",
+                value=role_text,
                 inline=False
             )
-            
+
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="serverinfo", description="Get information about this server")
@@ -1107,10 +1191,10 @@ class UtilityCog(commands.Cog):
         
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="weather", description="Get weather information for a city")
-    @app_commands.describe(city="City name to get weather for")
-    async def weather(self, ctx: commands.Context, *, city: str):
-        """Get weather information for a city."""
+    @commands.hybrid_command(name="weather", description="Get weather information for a city or zip code")
+    @app_commands.describe(location="City name or zip code (e.g., 'London' or '10001' or '10001,US')")
+    async def weather(self, ctx: commands.Context, *, location: str):
+        """Get weather information for a city or zip code."""
         # Delete command message for prefix commands
         if not ctx.interaction:
             try:
@@ -1125,8 +1209,11 @@ class UtilityCog(commands.Cog):
         
         try:
             async with aiohttp.ClientSession() as session:
+                # Determine if input is a zip code or city name
+                location_param = self._format_location_for_api(location)
+                
                 # Get current weather
-                url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+                url = f"http://api.openweathermap.org/data/2.5/weather?{location_param}&appid={api_key}&units=metric"
                 async with session.get(url, timeout=10) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -1195,8 +1282,15 @@ class UtilityCog(commands.Cog):
                         
                     elif response.status == 404:
                         embed = discord.Embed(
-                            title="❌ City Not Found",
-                            description=f"Could not find weather data for '{city}'. Please check the spelling and try again.",
+                            title="❌ Location Not Found",
+                            description=(
+                                f"Could not find weather data for '{location}'. "
+                                "Please check the spelling and try again.\n\n"
+                                "**Supported formats:**\n"
+                                "• City names: `London`, `New York`\n"
+                                "• ZIP codes: `10001` (US), `10001,US`\n"
+                                "• International postal codes: `SW1A 1AA,GB`"
+                            ),
                             color=discord.Color.red()
                         )
                         await ctx.send(embed=embed, ephemeral=True)
@@ -1207,6 +1301,24 @@ class UtilityCog(commands.Cog):
             await ctx.send("❌ Weather API request timed out. Please try again later!", ephemeral=True)
         except Exception as e:
             await ctx.send(f"❌ Failed to fetch weather: {str(e)}", ephemeral=True)
+
+    def _format_location_for_api(self, location: str) -> str:
+        """Format location input for OpenWeatherMap API."""
+        location = location.strip()
+        
+        # Check if it looks like a zip code (numeric, optionally with country code)
+        if ',' in location:
+            # Already has country code (e.g., "10001,US" or "SW1A 1AA,GB")
+            return f"zip={location}"
+        elif location.replace(' ', '').isdigit():
+            # Numeric only - assume US zip code
+            return f"zip={location},US"
+        elif len(location) == 5 and location.isdigit():
+            # 5-digit number - US zip code
+            return f"zip={location},US"
+        else:
+            # Assume it's a city name
+            return f"q={location}"
 
     @commands.command(name="poll", description="Create a poll with reactions")
     @commands.has_permissions(manage_messages=True)

@@ -8,7 +8,7 @@ import json
 import os
 import asyncio
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 from typing import Dict, List, Set
 from discord.utils import utcnow, format_dt
@@ -71,6 +71,46 @@ class DiscordBot(commands.Bot):
         # optional flag some cogs check
         self._did_tree_sync = False
 
+    @tasks.loop(minutes=5)  # Ping every 5 minutes to keep alive
+    async def keep_alive_task(self):
+        """Keep-alive task to prevent VS Code from timing out the bot."""
+        try:
+            # Simple ping to Discord API to maintain connection
+            latency = round(self.latency * 1000, 2)
+            self.logger.debug(f"Keep-alive ping - Latency: {latency}ms")
+            
+            # Optional: Send a heartbeat message to console every hour
+            if hasattr(self, '_keep_alive_counter'):
+                self._keep_alive_counter += 1
+                if self._keep_alive_counter >= 12:  # 12 * 5 minutes = 1 hour
+                    self.logger.info(f"Bot keep-alive heartbeat - Uptime: {self._get_uptime_string()}")
+                    self._keep_alive_counter = 0
+            else:
+                self._keep_alive_counter = 0
+                
+        except Exception as e:
+            self.logger.warning(f"Keep-alive task error: {e}")
+
+    @keep_alive_task.before_loop
+    async def before_keep_alive_task(self):
+        """Wait until the bot is ready before starting the keep-alive task."""
+        await self.wait_until_ready()
+        self.logger.info("Keep-alive task started")
+
+    def _get_uptime_string(self) -> str:
+        """Get a formatted uptime string."""
+        delta = utcnow() - self.boot_time
+        days = delta.days
+        hours, rem = divmod(delta.seconds, 3600)
+        minutes, _ = divmod(rem, 60)
+        
+        if days > 0:
+            return f"{days}d {hours}h {minutes}m"
+        elif hours > 0:
+            return f"{hours}h {minutes}m"
+        else:
+            return f"{minutes}m"
+
     async def setup_hook(self):
         """Load extensions and sync commands when the bot starts."""
         # Load all cogs
@@ -90,12 +130,21 @@ class DiscordBot(commands.Bot):
             self.last_sync_time = utcnow()
         except Exception as e:
             self.logger.error(f"Failed to sync commands: {e}")
+            
+        # Start the keep-alive task
+        if not self.keep_alive_task.is_running():
+            self.keep_alive_task.start()
+            self.logger.info("Keep-alive task initialized")
 
     # ---------- message handling ----------
     async def on_message(self, message: discord.Message):
         """Process commands and handle prefix command deletion."""
         if message.author.bot:
             return
+
+        # Log DM replies to bot
+        if isinstance(message.channel, discord.DMChannel):
+            await self._log_dm_reply(message)
 
         ctx = await self.get_context(message)
         
@@ -113,6 +162,102 @@ class DiscordBot(commands.Bot):
         else:
             # For non-prefix messages (e.g., mentions), just process normally
             await self.invoke(ctx)
+
+    async def _log_dm_reply(self, message: discord.Message):
+        """Log when users reply to the bot in DMs."""
+        try:
+            # Log to console/file
+            content_preview = message.content[:100]
+            if len(message.content) > 100:
+                content_preview += "..."
+            
+            self.logger.info(
+                "DM Reply from %s (%s): %s",
+                message.author.display_name,
+                message.author.id,
+                content_preview
+            )
+            
+            # Try to find a logging channel in any guild the bot is in
+            for guild in self.guilds:
+                # Look for common logging channel names
+                log_channel = None
+                channel_names = [
+                    'mod-logs', 'bot-logs', 'logs', 'moderation-logs'
+                ]
+                for channel_name in channel_names:
+                    log_channel = discord.utils.get(
+                        guild.channels, name=channel_name
+                    )
+                    if (log_channel and
+                            isinstance(log_channel, discord.TextChannel)):
+                        break
+                
+                if log_channel:
+                    # Create embed for DM reply
+                    embed = discord.Embed(
+                        title="📩 DM Reply Received",
+                        color=discord.Color.blue(),
+                        timestamp=message.created_at
+                    )
+                    
+                    user_info = (
+                        f"{message.author.mention}\n"
+                        f"`{message.author.display_name}` "
+                        f"({message.author.id})"
+                    )
+                    embed.add_field(
+                        name="� User",
+                        value=user_info,
+                        inline=True
+                    )
+                    
+                    content = message.content[:1024]
+                    if len(message.content) > 1024:
+                        content += "..."
+                    if not content:
+                        content = "*No text content*"
+                    
+                    embed.add_field(
+                        name="📝 Message",
+                        value=content,
+                        inline=False
+                    )
+                    
+                    # Add attachment info if any
+                    if message.attachments:
+                        attachment_list = [
+                            f"📎 {att.filename}"
+                            for att in message.attachments[:5]
+                        ]
+                        attachment_info = "\n".join(attachment_list)
+                        if len(message.attachments) > 5:
+                            extra_count = len(message.attachments) - 5
+                            attachment_info += f"\n... and {extra_count} more"
+                        embed.add_field(
+                            name="📎 Attachments",
+                            value=attachment_info,
+                            inline=False
+                        )
+                    
+                    embed.set_thumbnail(url=message.author.display_avatar.url)
+                    embed.set_footer(text="DM Reply • Bot Logging System")
+                    
+                    try:
+                        await log_channel.send(embed=embed)
+                        break  # Only send to first available log channel
+                    except discord.Forbidden:
+                        continue  # Try next guild if no permission
+                    except Exception as e:
+                        self.logger.error(
+                            "Failed to send DM log to %s: %s",
+                            log_channel.name,
+                            e
+                        )
+                        continue
+                        
+        except Exception as e:
+            self.logger.error("Failed to log DM reply: %s", e)
 
     # ---------- mod whitelist persistence helpers ----------
     def load_mod_whitelist(self) -> None:
@@ -167,6 +312,15 @@ class DiscordBot(commands.Bot):
         if removed:
             self.save_mod_whitelist()
         return removed
+
+    # ---------- Convenience aliases for shorter method names ----------
+    def add_mod_role(self, guild_id: int, role_id: int) -> None:
+        """Alias for add_guild_mod_role for convenience."""
+        return self.add_guild_mod_role(guild_id, role_id)
+
+    def remove_mod_role(self, guild_id: int, role_id: int) -> bool:
+        """Alias for remove_guild_mod_role for convenience."""
+        return self.remove_guild_mod_role(guild_id, role_id)
 
     # ---------- ALT whitelist persistence ----------
     def load_alt_whitelist(self) -> None:
@@ -413,6 +567,17 @@ class DiscordBot(commands.Bot):
                 await interaction.response.send_message("❌ An error occurred while executing the command.", ephemeral=True)
             else:
                 await interaction.followup.send("❌ An error occurred while executing the command.", ephemeral=True)
+
+    async def close(self):
+        """Clean shutdown of the bot."""
+        # Stop the keep-alive task
+        if hasattr(self, 'keep_alive_task') and self.keep_alive_task.is_running():
+            self.keep_alive_task.cancel()
+            self.logger.info("Keep-alive task stopped")
+        
+        # Call the parent close method
+        await super().close()
+        self.logger.info("Bot shutdown completed")
 
     # ---------- /health (public) ----------
     @app_commands.command(name="health", description="Show bot health / status.")
