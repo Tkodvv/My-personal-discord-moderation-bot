@@ -1129,11 +1129,19 @@ class AdminCog(commands.Cog):
             # Send the DM
             await user.send(message)
             
-            # Simple success message
-            await ctx.send(
-                f"✅ Direct message sent to {user.display_name}!",
-                ephemeral=True
-            )
+            # Check if it's a slash command (interaction) or prefix command
+            if ctx.interaction:
+                # For slash commands, send ephemeral (auto-hidden)
+                await ctx.send(
+                    f"✅ Direct message sent to {user.display_name}!",
+                    ephemeral=True
+                )
+            else:
+                # For prefix commands, send and auto-delete after 1 second
+                await ctx.send(
+                    f"✅ Direct message sent to {user.display_name}!",
+                    delete_after=1
+                )
             
             # Log the action
             self.logger.info(
@@ -1145,18 +1153,112 @@ class AdminCog(commands.Cog):
             )
             
         except discord.Forbidden:
-            await ctx.send(
-                f"❌ Could not send DM to {user.display_name}. "
-                "They may have DMs disabled or blocked the bot.",
-                ephemeral=True
-            )
+            if ctx.interaction:
+                await ctx.send(
+                    f"❌ Could not send DM to {user.display_name}. "
+                    "They may have DMs disabled or blocked the bot.",
+                    ephemeral=True
+                )
+            else:
+                await ctx.send(
+                    f"❌ Could not send DM to {user.display_name}. "
+                    "They may have DMs disabled or blocked the bot.",
+                    delete_after=3
+                )
             
         except discord.HTTPException as e:
-            await ctx.send(
-                f"❌ Failed to send DM to {user.display_name}: {e}",
-                ephemeral=True
-            )
+            if ctx.interaction:
+                await ctx.send(
+                    f"❌ Failed to send DM to {user.display_name}: {e}",
+                    ephemeral=True
+                )
+            else:
+                await ctx.send(
+                    f"❌ Failed to send DM to {user.display_name}: {e}",
+                    delete_after=3
+                )
             self.logger.error("Failed to send DM to %s: %s", user, e)
+
+    # =========================================================
+    # STATUS COMMAND
+    # =========================================================
+
+    @commands.hybrid_command(
+        name="status",
+        description="Show bot status and statistics"
+    )
+    async def status(self, ctx):
+        """Show bot status and statistics."""
+        try:
+            # Get bot stats
+            guild_count = len(self.bot.guilds)
+            total_members = sum(guild.member_count for guild in self.bot.guilds)
+            
+            # Get uptime
+            uptime = discord.utils.utcnow() - self.bot.start_time
+            uptime_str = str(uptime).split('.')[0]  # Remove microseconds
+            
+            # Get latency
+            latency = round(self.bot.latency * 1000, 1)
+            
+            # Create status embed
+            embed = discord.Embed(
+                title="🤖 Bot Status",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            
+            embed.add_field(
+                name="📊 Statistics",
+                value=(
+                    f"**Guilds:** {guild_count}\n"
+                    f"**Members:** {total_members:,}\n"
+                    f"**Commands:** 57"
+                ),
+                inline=True
+            )
+            
+            embed.add_field(
+                name="⚡ Performance",
+                value=(
+                    f"**Latency:** {latency}ms\n"
+                    f"**Uptime:** {uptime_str}\n"
+                    f"**Status:** Online"
+                ),
+                inline=True
+            )
+            
+            embed.add_field(
+                name="🔧 System",
+                value=(
+                    f"**Python:** 3.13\n"
+                    f"**Discord.py:** {discord.__version__}\n"
+                    f"**Prefix:** !"
+                ),
+                inline=True
+            )
+            
+            embed.set_thumbnail(url=self.bot.user.display_avatar.url)
+            
+            # Auto-delete the command message for prefix commands only
+            if not ctx.interaction:
+                try:
+                    await ctx.message.delete()
+                except discord.NotFound:
+                    pass  # Message already deleted
+                except discord.Forbidden:
+                    pass  # No permission to delete
+            
+            # Send message permanently (no auto-delete)
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            error_msg = f"❌ Failed to get bot status: {e}"
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, delete_after=5)
+            self.logger.error("Failed to get bot status: %s", e)
 
 
 async def setup(bot):

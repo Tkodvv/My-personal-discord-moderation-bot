@@ -139,29 +139,16 @@ class DiscordBot(commands.Bot):
     # ---------- message handling ----------
     async def on_message(self, message: discord.Message):
         """Process commands and handle prefix command deletion."""
+        # Always ignore bot messages first
         if message.author.bot:
             return
 
-        # Log DM replies to bot
+        # Log DM replies to bot (only from non-bot users)
         if isinstance(message.channel, discord.DMChannel):
             await self._log_dm_reply(message)
 
-        ctx = await self.get_context(message)
-        
-        # For prefix commands only
-        if message.content.startswith(self._text_prefix):
-            try:
-                # Process the command
-                await self.invoke(ctx)
-                
-                # Don't auto-delete here since individual commands handle their own deletion
-                # This prevents the 404 Not Found error when trying to delete twice
-                
-            except Exception as e:
-                self.logger.error(f"Command processing error: {e}", exc_info=True)
-        else:
-            # For non-prefix messages (e.g., mentions), just process normally
-            await self.invoke(ctx)
+        # Process all commands normally
+        await self.process_commands(message)
 
     async def _log_dm_reply(self, message: discord.Message):
         """Log when users reply to the bot in DMs."""
@@ -508,6 +495,10 @@ class DiscordBot(commands.Bot):
             self.logger.error(f"Failed to sync slash commands: {e}")
 
     async def on_ready(self):
+        # Set start time for uptime calculation
+        if not hasattr(self, 'start_time'):
+            self.start_time = utcnow()
+            
         if self.user:
             self.logger.info(f"Bot is ready! Logged in as {self.user} (ID: {self.user.id})")
         self.logger.info(f"Connected to {len(self.guilds)} guilds")

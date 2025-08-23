@@ -8,7 +8,6 @@ import logging
 import re
 import discord
 from discord.ext import commands
-from discord.ext.commands import MemberNotFound  # Used in exception handling
 from discord import app_commands
 from datetime import timedelta
 from typing import Optional
@@ -187,12 +186,9 @@ class ModerationCog(commands.Cog):
             await interaction.guild.ban(user, reason=f"Banned by {interaction.user}: {reason}", delete_message_days=delete_messages or 0)
             
             # Create success embed
-            ban_type = "banned" if member else "hackbanned"
-            e = self._dyno_style_embed(ban_type, user, reason)
+            e = self._dyno_style_embed("banned", user, reason)
             if delete_messages:
                 e.description += f"\n***Messages Deleted:*** {delete_messages} day(s)"
-            if not member:
-                e.description += f"\n***Type:*** Hackban (user not in server)"
             e.set_footer(text=f"User ID: {user.id}")
             await interaction.response.send_message(embed=e)
             
@@ -531,7 +527,7 @@ class ModerationCog(commands.Cog):
                 member_converter = commands.MemberConverter()
                 member = await member_converter.convert(ctx, target)
                 user = member
-            except (commands.BadArgument, MemberNotFound):
+            except (commands.BadArgument, commands.MemberNotFound):
                 # Member converter failed, try other methods
                 # Try to parse as user ID
                 if target.isdigit():
@@ -625,10 +621,7 @@ class ModerationCog(commands.Cog):
                 user, reason=f"Banned by {ctx.author}: {reason}")
             
             # Create success embed
-            ban_type = "banned" if member else "hackbanned"
-            e = self._dyno_style_embed(ban_type, user, reason)
-            if not member:
-                e.description += "\n***Type:*** Hackban (user not in server)"
+            e = self._dyno_style_embed("banned", user, reason)
             e.set_footer(text=f"User ID: {user.id}")
             await ctx.send(embed=e)
             

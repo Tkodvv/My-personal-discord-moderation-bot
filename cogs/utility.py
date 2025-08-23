@@ -22,20 +22,19 @@ load_dotenv()
 class EmbedModal(discord.ui.Modal, title='Create Custom Embed'):
     """Modal for creating custom embeds with proper formatting."""
     
-    def __init__(self, temp_message=None):
+    def __init__(self):
         super().__init__()
-        self.temp_message = temp_message
         
     title_input = discord.ui.TextInput(
         label='Title',
-        placeholder='Enter the embed title (optional)',
+        placeholder='Enter title (can include :BunnyButt: emojis)',
         required=False,
         max_length=256
     )
     
     description_input = discord.ui.TextInput(
         label='Description',
-        placeholder='Enter the embed description/content',
+        placeholder='Enter description (can include :BunnyButt: emojis)',
         style=discord.TextStyle.paragraph,
         required=False,
         max_length=4000
@@ -110,41 +109,15 @@ class EmbedModal(discord.ui.Modal, title='Create Custom Embed'):
             except:
                 embed.set_author(name=self.author_input.value)  # Fallback without icon
                 
-        # Send embed through webhook for complete silence
-        try:
-            webhooks = await interaction.channel.webhooks()
-            webhook = None
-            
-            # Look for existing bot webhook
-            for wh in webhooks:
-                if wh.name == "Silent Embed Bot":
-                    webhook = wh
-                    break
-            
-            # Create webhook if none exists
-            if webhook is None:
-                webhook = await interaction.channel.create_webhook(name="Silent Embed Bot")
-            
-            # Send embed through webhook (completely silent)
-            await webhook.send(
-                embed=embed,
-                username=interaction.client.user.display_name,
-                avatar_url=interaction.client.user.display_avatar.url
-            )
-            
-            # Send invisible response to close the modal
-            await interaction.response.send_message("✅", ephemeral=True, delete_after=1)
-            
-        except discord.Forbidden:
-            # Fallback to normal response if webhook fails
-            await interaction.response.send_message(embed=embed)
-        
-        # Delete the temporary message after a short delay
-        if self.temp_message:
-            try:
-                await self.temp_message.delete()
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass  # Message already deleted or can't be deleted
+        # Send embed as regular bot message - COMPLETELY SILENT
+        # Acknowledge the interaction silently first
+        await interaction.response.defer(ephemeral=True)
+        # Send the embed directly to the channel (bypasses Discord command logging)
+        if hasattr(interaction.channel, 'send'):
+            await interaction.channel.send(embed=embed)
+        else:
+            # Fallback to followup if channel doesn't support send
+            await interaction.followup.send(embed=embed)
 
 
 class UtilityCog(commands.Cog):
@@ -185,264 +158,66 @@ class UtilityCog(commands.Cog):
         uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
         await ctx.send(f"⏰ Bot uptime: `{uptime_str}`", ephemeral=True)
 
-    @commands.command(name="embed", description="Create a silent embed message")
+    @commands.hybrid_command(
+        name="embed",
+        description="Create a custom embed message"
+    )
     @commands.has_permissions(manage_messages=True)
     async def embed_command(self, ctx: commands.Context):
-        """Create a completely silent embed using modal popup."""
-        # Delete command message immediately
-        try:
-            await ctx.message.delete()
-        except (discord.NotFound, discord.Forbidden):
-            pass
-        
-        # Send a temporary message that will be used to trigger the modal
-        temp_msg = await ctx.send("📝")
-        
-        # Create the view and edit the message to show the button
-        view = EmbedFormView(temp_msg)
-        await temp_msg.edit(content="Click to create embed:", view=view)
-    
-    @commands.command(name="embedform", aliases=['eform'], description="Create an embed using modal form")
-    @commands.has_permissions(manage_messages=True)
-    async def embed_form_command(self, ctx: commands.Context):
-        """Create a custom embed message using a modal popup form."""
-        # Delete command message immediately
-        try:
-            await ctx.message.delete()
-        except (discord.NotFound, discord.Forbidden):
-            pass
-        
-        # Send a temporary message that will be edited to show the modal
-        temp_msg = await ctx.send("Opening embed creator...")
-        
-        # Create the view and edit the message to show the button
-        view = EmbedFormView(temp_msg)
-        embed = discord.Embed(
-            title="📝 Embed Form Creator", 
-            description="Click the button below to open the form interface.",
-            color=discord.Color.green()
-        )
-        await temp_msg.edit(content=None, embed=embed, view=view)
-    
-    @commands.command(name="quickembed", aliases=['qembed'], description="Create a quick embed with inline syntax")
-    @commands.has_permissions(manage_messages=True)
-    async def quick_embed_command(self, ctx: commands.Context, *, content: str = None):
-        """Create a quick embed message. Usage: !quickembed [title] | [description] | [color] | [author] | [author_icon]"""
-        # Delete command message immediately
-        try:
-            await ctx.message.delete()
-        except (discord.NotFound, discord.Forbidden):
-            pass
-        
-        if content is None:
-            # Send simple usage message
-            embed = discord.Embed(
-                title="⚡ Quick Embed Creator",
-                description="**Usage:** `!quickembed [title] | [description] | [color] | [author] | [author_icon]`\n\n"
-                           "**Examples:**\n"
-                           "`!quickembed Welcome! | This is a welcome message | blue`\n"
-                           "`!quickembed | Just a description with no title | #ff0000`\n"
-                           "`!quickembed Rules | Server rules here | green | Staff Team | https://example.com/icon.png`\n\n"
-                           "**Tips:**\n"
-                           "• Use `|` to separate different parts\n"
-                           "• Leave parts empty but keep the `|` separators\n"
-                           "• Colors: hex (#ff0000) or names (red, blue, green, etc.)\n"
-                           "• Author icon must be a valid image URL\n"
-                           "• Use `!embed` for the form interface",
-                color=discord.Color.green()
-            )
-            await ctx.send(embed=embed, delete_after=30)
-            return
-        
-        # Parse the content
-        parts = [part.strip() for part in content.split('|')]
-        
-        # Pad parts list to ensure we have all possible parts
-        while len(parts) < 5:
-            parts.append('')
-        
-        title = parts[0] if parts[0] else None
-        description = parts[1] if parts[1] else None
-        color_str = parts[2] if parts[2] else 'blue'
-        author_name = parts[3] if parts[3] else None
-        author_icon = parts[4] if parts[4] else None
-        
-        # Validate input
-        if not title and not description:
-            await ctx.send("❌ You must provide at least a title or description for the embed.", delete_after=10)
-            return
-        
-        # Create embed
-        embed = discord.Embed()
-        
-        if title:
-            embed.title = title
-        if description:
-            embed.description = description
-        
-        # Set color
-        try:
-            if color_str.startswith('#'):
-                embed.color = discord.Color(int(color_str[1:], 16))
-            elif hasattr(discord.Color, color_str.lower()):
-                embed.color = getattr(discord.Color, color_str.lower())()
-            else:
-                embed.color = discord.Color(int(color_str, 16))
-        except (ValueError, AttributeError):
-            embed.color = discord.Color.blue()
-        
-        # Set author
-        if author_name:
-            try:
-                if author_icon:
-                    embed.set_author(name=author_name, icon_url=author_icon)
-                else:
-                    embed.set_author(name=author_name)
-            except:
-                embed.set_author(name=author_name)
-        
-        # Send the embed
-        await ctx.send(embed=embed)
-
-
-class EmbedFormView(discord.ui.View):
-    """View for the embed form button."""
-    
-    def __init__(self, message=None):
-        super().__init__(timeout=60)
-        self.message = message
-    
-    @discord.ui.button(label='Create Embed', style=discord.ButtonStyle.primary, emoji='📝')
-    async def create_embed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Check permissions
-        if not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("❌ You need `manage_messages` permission to use this command.", ephemeral=True)
-            return
-        
-        modal = EmbedModal(self.message)
-        await interaction.response.send_modal(modal)
-    
-    async def on_timeout(self):
-        # Delete the message when the view times out
-        if self.message:
-            try:
-                await self.message.delete()
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass  # Message already deleted or can't be deleted
-
-
-class EmbedFormView(discord.ui.View):
-    """View for the embed form button."""
-    
-    def __init__(self, message=None):
-        super().__init__(timeout=60)
-        self.message = message
-    
-    @discord.ui.button(label='Create Embed', style=discord.ButtonStyle.primary, emoji='📝')
-    async def create_embed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Check permissions
-        if not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("❌ You need `manage_messages` permission to use this command.", ephemeral=True)
-            return
-        
-        modal = EmbedModal(self.message)
-        await interaction.response.send_modal(modal)
-    
-    async def on_timeout(self):
-        # Delete the message when the view times out
-        if self.message:
-            try:
-                await self.message.delete()
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass  # Message already deleted or can't be deleted
-
-
-class UtilityCog(commands.Cog):
-    """Utility commands cog."""
-
-    def __init__(self, bot):
-        self.bot = bot
-        self.start_time = utcnow()
-
-    @commands.hybrid_command(name="ping", description="Check bot's latency")
-    async def ping(self, ctx: commands.Context):
-        """Check the bot's latency."""
-        # Delete command message for prefix commands
+        """Create a custom embed using modal popup - CLEAN VERSION."""
+        # Delete command message immediately for prefix commands
         if not ctx.interaction:
             try:
                 await ctx.message.delete()
             except (discord.NotFound, discord.Forbidden):
                 pass
         
-        latency = round(self.bot.latency * 1000)
-        await ctx.send(f"🏓 Pong! Latency: {latency}ms")
-
-    @commands.hybrid_command(name="uptime", description="Check bot's uptime")
-    async def uptime(self, ctx: commands.Context):
-        """Check the bot's uptime."""
-        # Delete command message for prefix commands
+        # For slash commands, immediately show modal
+        if ctx.interaction:
+            modal = EmbedModal()
+            await ctx.interaction.response.send_modal(modal)
+        else:
+            # For prefix commands, we need to create a temporary interaction-like experience
+            # Send a simple ephemeral message asking them to use the slash command
+            await ctx.send("Please use the `/embed` slash command for the modal popup!", delete_after=3)
+    
+    @commands.hybrid_command(
+        name="embedform",
+        aliases=['eform'],
+        description="Create an embed using modal form"
+    )
+    @commands.has_permissions(manage_messages=True)
+    async def embed_form_command(self, ctx: commands.Context):
+        """Create a custom embed message using a modal popup form."""
+        # Delete command message immediately for prefix commands
         if not ctx.interaction:
             try:
                 await ctx.message.delete()
             except (discord.NotFound, discord.Forbidden):
                 pass
         
-        uptime_duration = utcnow() - self.bot.boot_time
-        days = uptime_duration.days
-        hours, remainder = divmod(uptime_duration.seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        
-        uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
-        await ctx.send(f"⏰ Bot uptime: `{uptime_str}`", ephemeral=True)
-
-    @commands.command(name="embed", description="Create a silent embed message")
-    @commands.has_permissions(manage_messages=True)
-    async def embed_command(self, ctx: commands.Context):
-        """Create a completely silent embed using modal popup."""
-        # Delete command message immediately
-        try:
-            await ctx.message.delete()
-        except (discord.NotFound, discord.Forbidden):
-            pass
-        
-        # Send a temporary message that will be used to trigger the modal
-        temp_msg = await ctx.send("📝")
-        
-        # Create the view and edit the message to show the button
-        view = EmbedFormView(temp_msg)
-        await temp_msg.edit(content="Click to create embed:", view=view)
+        # For slash commands, immediately show modal
+        if ctx.interaction:
+            modal = EmbedModal()
+            await ctx.interaction.response.send_modal(modal)
+        else:
+            # For prefix commands, ask them to use slash command
+            await ctx.send("Please use the `/embedform` slash command for the modal popup!", delete_after=3)
     
-    @commands.command(name="embedform", aliases=['eform'], description="Create an embed using modal form")
-    @commands.has_permissions(manage_messages=True)
-    async def embed_form_command(self, ctx: commands.Context):
-        """Create a custom embed message using a modal popup form."""
-        # Delete command message immediately
-        try:
-            await ctx.message.delete()
-        except (discord.NotFound, discord.Forbidden):
-            pass
-        
-        # Send a temporary message that will be edited to show the modal
-        temp_msg = await ctx.send("Opening embed creator...")
-        
-        # Create the view and edit the message to show the button
-        view = EmbedFormView(temp_msg)
-        embed = discord.Embed(
-            title="📝 Embed Form Creator", 
-            description="Click the button below to open the form interface.",
-            color=discord.Color.green()
-        )
-        await temp_msg.edit(content=None, embed=embed, view=view)
-    
-    @commands.command(name="quickembed", aliases=['qembed'], description="Create a quick embed with inline syntax")
+    @commands.hybrid_command(
+        name="quickembed",
+        aliases=['qembed'],
+        description="Create a quick embed with inline syntax"
+    )
     @commands.has_permissions(manage_messages=True)
     async def quick_embed_command(self, ctx: commands.Context, *, content: str = None):
-        """Create a quick embed message. Usage: !quickembed [title] | [description] | [color] | [author] | [author_icon]"""
-        # Delete command message immediately
-        try:
-            await ctx.message.delete()
-        except (discord.NotFound, discord.Forbidden):
-            pass
+        """Create a quick embed message. Usage: quickembed [title] | [description] | [color] | [author] | [author_icon]"""
+        # Delete command message immediately for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
         
         if content is None:
             # Send simple usage message
@@ -822,45 +597,13 @@ class UtilityCog(commands.Cog):
                     if response.status == 200:
                         data = await response.json()
                         if data and isinstance(data, list):
-                            # Use webhook for silent sending
-                            try:
-                                webhooks = await ctx.channel.webhooks()
-                                webhook = None
-                                
-                                # Look for existing bot webhook
-                                for wh in webhooks:
-                                    if wh.name == "Silent Cat Bot":
-                                        webhook = wh
-                                        break
-                                
-                                # Create webhook if none exists
-                                if webhook is None:
-                                    webhook = await ctx.channel.create_webhook(name="Silent Cat Bot")
-                                
-                                # Send cat images through webhook (completely silent)
-                                for item in data:
-                                    cat_url = item.get("url")
-                                    if cat_url:
-                                        await webhook.send(
-                                            content=cat_url,
-                                            username=ctx.bot.user.display_name,
-                                            avatar_url=ctx.bot.user.display_avatar.url
-                                        )
-                                        if len(data) > 1:
-                                            await asyncio.sleep(0.5)  # Small delay between multiple cats
-                                
-                                # Send confirmation only for slash commands
-                                if ctx.interaction:
-                                    await ctx.interaction.followup.send(f"🐱 Sent {n} cat{'s' if n > 1 else ''}!", ephemeral=True)
-                                
-                            except discord.Forbidden:
-                                # Fallback to normal send if webhook fails
-                                for item in data:
-                                    cat_url = item.get("url")
-                                    if cat_url:
-                                        await ctx.send(cat_url)  # Send only the image URL for cleaner look
-                                        if len(data) > 1:
-                                            await asyncio.sleep(0.5)  # Small delay between multiple cats
+                            # Send cat images as regular bot messages
+                            for item in data:
+                                cat_url = item.get("url")
+                                if cat_url:
+                                    await ctx.send(cat_url)
+                                    if len(data) > 1:
+                                        await asyncio.sleep(0.5)  # Small delay between multiple cats
                             return
                     else:
                         error_msg = f"❌ Cat API error: HTTP {response.status}"
