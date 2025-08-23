@@ -1143,9 +1143,14 @@ class AdminCog(commands.Cog):
                 
                 if not members_with_role:
                     if ctx.interaction:
-                        await ctx.send(f"❌ No members found with the role {target.name}.", ephemeral=True)
+                        await ctx.send(f"❌ No members found with the role **{target.name}**.", ephemeral=True)
                     else:
-                        await ctx.send(f"❌ No members found with the role {target.name}.", delete_after=3)
+                        # Use allowed_mentions to prevent any accidental role pings
+                        await ctx.send(
+                            f"❌ No members found with the role **{target.name}**.", 
+                            delete_after=3, 
+                            allowed_mentions=discord.AllowedMentions.none()
+                        )
                     return
                 
                 # Send DM to all members with the role
@@ -1159,14 +1164,15 @@ class AdminCog(commands.Cog):
                     except (discord.Forbidden, discord.HTTPException):
                         failed_dms += 1
                 
-                # Send summary
+                # Send summary (use role name, not mention to avoid ping)
                 total_members = len(members_with_role)
-                summary = f"📨 **Role DM Summary for {target.name}:**\n✅ Sent: {successful_dms}/{total_members}\n❌ Failed: {failed_dms}/{total_members}"
+                summary = f"📨 **Role DM Summary for `{target.name}`:**\n✅ Sent: {successful_dms}/{total_members}\n❌ Failed: {failed_dms}/{total_members}"
                 
                 if ctx.interaction:
                     await ctx.send(summary, ephemeral=True)
                 else:
-                    await ctx.send(summary, delete_after=10)
+                    # Use allowed_mentions to prevent any accidental role pings
+                    await ctx.send(summary, delete_after=10, allowed_mentions=discord.AllowedMentions.none())
                 
                 # Log the action
                 self.logger.info(
@@ -1193,9 +1199,11 @@ class AdminCog(commands.Cog):
                     )
                 else:
                     # For prefix commands, send and auto-delete after 1 second
+                    # Use allowed_mentions to prevent any accidental user pings
                     await ctx.send(
-                        f"✅ Direct message sent to {target.display_name}!",
-                        delete_after=1
+                        f"✅ Direct message sent to **{target.display_name}**!",
+                        delete_after=1,
+                        allowed_mentions=discord.AllowedMentions.none()
                     )
                 
                 # Log the action
@@ -1221,15 +1229,16 @@ class AdminCog(commands.Cog):
             if isinstance(target, discord.User):
                 if ctx.interaction:
                     await ctx.send(
-                        f"❌ Could not send DM to {target.display_name}. "
+                        f"❌ Could not send DM to **{target.display_name}**. "
                         "They may have DMs disabled or blocked the bot.",
                         ephemeral=True
                     )
                 else:
                     await ctx.send(
-                        f"❌ Could not send DM to {target.display_name}. "
+                        f"❌ Could not send DM to **{target.display_name}**. "
                         "They may have DMs disabled or blocked the bot.",
-                        delete_after=3
+                        delete_after=3,
+                        allowed_mentions=discord.AllowedMentions.none()
                     )
             
         except discord.HTTPException as e:
@@ -1246,13 +1255,14 @@ class AdminCog(commands.Cog):
             if isinstance(target, discord.User):
                 if ctx.interaction:
                     await ctx.send(
-                        f"❌ Failed to send DM to {target.display_name}: {e}",
+                        f"❌ Failed to send DM to **{target.display_name}**: {e}",
                         ephemeral=True
                     )
                 else:
                     await ctx.send(
-                        f"❌ Failed to send DM to {target.display_name}: {e}",
-                        delete_after=3
+                        f"❌ Failed to send DM to **{target.display_name}**: {e}",
+                        delete_after=3,
+                        allowed_mentions=discord.AllowedMentions.none()
                     )
                 self.logger.error("Failed to send DM to %s: %s", target, e)
 
