@@ -60,12 +60,103 @@ class AdminCog(commands.Cog):
         self.logger = logging.getLogger(__name__)
         self.no_pings = discord.AllowedMentions.none()
         
+        # Bot status persistence file
+        self.status_file = "data/bot_status.json"
+        
+        # Ensure data directory exists
+        os.makedirs("data", exist_ok=True)
+        
+        # Load saved status/presence settings
+        self.saved_status = self.load_status_settings()
+        
         # Allowed roles for /say command
         self.allowed_say_roles = {
             1383421890403762286,
             1349191381310111824,
             1379755293797384202,
         }
+        
+        # Initialize status on bot ready
+        self.bot.loop.create_task(self.restore_status_on_ready())
+
+    def load_status_settings(self):
+        """Load saved status and presence settings from file."""
+        try:
+            if os.path.exists(self.status_file):
+                with open(self.status_file, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            self.logger.error(f"Failed to load status settings: {e}")
+        
+        # Default settings
+        return {
+            "activity_type": "watching",
+            "activity_name": "for rule violations",
+            "presence": "online"
+        }
+    
+    def save_status_settings(self, activity_type=None, activity_name=None, presence=None):
+        """Save current status and presence settings to file."""
+        try:
+            # Update only provided values
+            if activity_type is not None:
+                self.saved_status["activity_type"] = activity_type
+            if activity_name is not None:
+                self.saved_status["activity_name"] = activity_name
+            if presence is not None:
+                self.saved_status["presence"] = presence
+            
+            with open(self.status_file, 'w') as f:
+                json.dump(self.saved_status, f, indent=2)
+            
+            self.logger.info("Status settings saved to file")
+        except Exception as e:
+            self.logger.error(f"Failed to save status settings: {e}")
+    
+    async def restore_status_on_ready(self):
+        """Restore saved status and presence when bot becomes ready."""
+        # Wait for bot to be ready
+        await self.bot.wait_until_ready()
+        
+        try:
+            # Map activity types
+            activity_mapping = {
+                'playing': discord.ActivityType.playing,
+                'watching': discord.ActivityType.watching,
+                'listening': discord.ActivityType.listening,
+                'streaming': discord.ActivityType.streaming,
+                'competing': discord.ActivityType.competing
+            }
+            
+            # Map presence types
+            presence_mapping = {
+                'online': discord.Status.online,
+                'idle': discord.Status.idle,
+                'dnd': discord.Status.dnd,
+                'invisible': discord.Status.invisible
+            }
+            
+            # Get saved settings
+            activity_type = self.saved_status.get("activity_type", "watching")
+            activity_name = self.saved_status.get("activity_name", "for rule violations")
+            presence = self.saved_status.get("presence", "online")
+            
+            # Create activity
+            activity = discord.Activity(
+                type=activity_mapping.get(activity_type, discord.ActivityType.watching),
+                name=activity_name
+            )
+            
+            # Set status and presence
+            await self.bot.change_presence(
+                status=presence_mapping.get(presence, discord.Status.online),
+                activity=activity
+            )
+            
+            self.logger.info(f"Restored bot status: {activity_type} {activity_name} | {presence}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to restore bot status: {e}")
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -646,8 +737,8 @@ class AdminCog(commands.Cog):
     # =========================================================
 
     @commands.command(name="say")
-    async def prefix_say(self, ctx, *, message: str):
-        """Make the bot say something (prefix version)"""
+    async def prefix_say(self, ctx, *, message: str = None):
+        """Make the bot say something (prefix version) - supports text and attachments"""
         if not isinstance(ctx.author, discord.Member):
             return
         
@@ -658,14 +749,32 @@ class AdminCog(commands.Cog):
             response = await ctx.send("❌ You don't have access to this command.")
             await response.delete(delay=5)
             return
+        
+        # Get attachments from the command message
+        files: list[discord.File] = []
+        for attachment in ctx.message.attachments:
+            try:
+                data = await attachment.read()
+                files.append(discord.File(io.BytesIO(data), filename=attachment.filename))
+            except Exception as e:
+                self.logger.error(f"Failed to process attachment: {e}")
+                continue
+        
+        # Check if message or attachments are provided
+        content = message.strip() if message else None
+        if not content and not files:
+            await ctx.message.delete()
+            response = await ctx.send("❌ Please provide a message or attach files. Usage: `!say <message>` or attach images/files")
+            await response.delete(delay=5)
+            return
             
         try:
             # Delete command message
             await ctx.message.delete()
             
-            # Send the message
+            # Send the message with attachments
             allowed = discord.AllowedMentions(everyone=False, users=True, roles=True)
-            await ctx.channel.send(content=message, allowed_mentions=allowed)
+            await ctx.channel.send(content=content, files=files or None, allowed_mentions=allowed)
             self.logger.info(f"Say command used by {ctx.author} in {ctx.guild.name}")
             
         except discord.Forbidden:
@@ -1346,6 +1455,215 @@ class AdminCog(commands.Cog):
             else:
                 await ctx.send(error_msg, delete_after=5)
             self.logger.error("Failed to get bot status: %s", e)
+
+    # =========================================================
+    # BOT ACTIVITY/STATUS COMMANDS
+    # =========================================================
+
+    @commands.hybrid_command(
+        name="setstatus",
+        description="Change the bot's activity status"
+    )
+    @commands.is_owner()
+    async def setstatus(self, ctx, activity_type: str, *, status_text: str):
+        """Change the bot's activity status.
+        
+        Activity types: playing, watching, listening, streaming, competing
+        """
+        # Auto-delete the command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                pass
+        
+        activity_type = activity_type.lower()
+        
+        # Map activity types
+        activity_mapping = {
+            'playing': discord.ActivityType.playing,
+            'watching': discord.ActivityType.watching,
+            'listening': discord.ActivityType.listening,
+            'streaming': discord.ActivityType.streaming,
+            'competing': discord.ActivityType.competing
+        }
+        
+        if activity_type not in activity_mapping:
+            valid_types = ", ".join(activity_mapping.keys())
+            error_msg = f"❌ Invalid activity type. Valid types: {valid_types}"
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, delete_after=5)
+            return
+        
+        try:
+            # Create the activity
+            activity = discord.Activity(
+                type=activity_mapping[activity_type],
+                name=status_text
+            )
+            
+            # Change the bot's status (preserve current presence status)
+            current_status = self.bot.status if hasattr(self.bot, 'status') else discord.Status.online
+            await self.bot.change_presence(status=current_status, activity=activity)
+            
+            # Save the new status settings
+            self.save_status_settings(activity_type=activity_type, activity_name=status_text)
+            
+            # Confirm the change
+            success_msg = f"✅ Status changed to **{activity_type.title()}** `{status_text}` (saved)"
+            if ctx.interaction:
+                await ctx.send(success_msg, ephemeral=True)
+            else:
+                await ctx.send(success_msg, delete_after=3)
+                
+            self.logger.info("Bot status changed to %s: %s", activity_type, status_text)
+            
+        except Exception as e:
+            error_msg = f"❌ Failed to change status: {e}"
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, delete_after=5)
+            self.logger.error("Failed to change bot status: %s", e)
+
+    @commands.hybrid_command(
+        name="resetstatus",
+        description="Reset the bot's status to default (Watching for rule violations)"
+    )
+    @commands.is_owner()
+    async def resetstatus(self, ctx):
+        """Reset the bot's status to the default."""
+        # Auto-delete the command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                pass
+        
+        try:
+            # Create default activity
+            activity = discord.Activity(
+                type=discord.ActivityType.watching,
+                name="for rule violations"
+            )
+            
+            # Change the bot's status (preserve current presence status)
+            current_status = self.bot.status if hasattr(self.bot, 'status') else discord.Status.online
+            await self.bot.change_presence(status=current_status, activity=activity)
+            
+            # Save the reset status settings
+            self.save_status_settings(activity_type="watching", activity_name="for rule violations")
+            
+            # Confirm the change
+            success_msg = "✅ Status reset to default: **Watching** `for rule violations` (saved)"
+            if ctx.interaction:
+                await ctx.send(success_msg, ephemeral=True)
+            else:
+                await ctx.send(success_msg, delete_after=3)
+                
+            self.logger.info("Bot status reset to default")
+            
+        except Exception as e:
+            error_msg = f"❌ Failed to reset status: {e}"
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, delete_after=5)
+            self.logger.error("Failed to reset bot status: %s", e)
+
+    @commands.hybrid_command(
+        name="setpresence",
+        description="Change the bot's Discord presence (online/idle/dnd/invisible)"
+    )
+    @commands.is_owner()
+    async def setpresence(self, ctx, presence: str):
+        """Change the bot's Discord presence.
+        
+        Presence types: online, idle, dnd, invisible
+        """
+        # Auto-delete the command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                pass
+        
+        presence = presence.lower()
+        
+        # Map presence types
+        presence_mapping = {
+            'online': discord.Status.online,
+            'idle': discord.Status.idle,
+            'dnd': discord.Status.dnd,
+            'invisible': discord.Status.invisible
+        }
+        
+        if presence not in presence_mapping:
+            valid_presences = ", ".join(presence_mapping.keys())
+            error_msg = f"❌ Invalid presence. Valid types: {valid_presences}"
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, delete_after=5)
+            return
+        
+        try:
+            # Get current activity from saved settings to preserve it
+            current_activity_type = self.saved_status.get("activity_type", "watching")
+            current_activity_name = self.saved_status.get("activity_name", "for rule violations")
+            
+            # Map activity types
+            activity_mapping = {
+                'playing': discord.ActivityType.playing,
+                'watching': discord.ActivityType.watching,
+                'listening': discord.ActivityType.listening,
+                'streaming': discord.ActivityType.streaming,
+                'competing': discord.ActivityType.competing
+            }
+            
+            # Create activity from saved settings
+            activity = discord.Activity(
+                type=activity_mapping.get(current_activity_type, discord.ActivityType.watching),
+                name=current_activity_name
+            )
+            
+            # Change the bot's presence while preserving activity
+            await self.bot.change_presence(status=presence_mapping[presence], activity=activity)
+            
+            # Save the new presence setting
+            self.save_status_settings(presence=presence)
+            
+            # Confirm the change
+            presence_display = {
+                'online': '🟢 Online',
+                'idle': '🟡 Idle',
+                'dnd': '🔴 Do Not Disturb',
+                'invisible': '⚫ Invisible'
+            }
+            
+            success_msg = f"✅ Presence changed to {presence_display[presence]} (saved)"
+            if ctx.interaction:
+                await ctx.send(success_msg, ephemeral=True)
+            else:
+                await ctx.send(success_msg, delete_after=3)
+                
+            self.logger.info("Bot presence changed to: %s", presence)
+            
+        except Exception as e:
+            error_msg = f"❌ Failed to change presence: {e}"
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, delete_after=5)
+            self.logger.error("Failed to change bot presence: %s", e)
 
 
 async def setup(bot):
