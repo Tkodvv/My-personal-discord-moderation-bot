@@ -13,6 +13,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from typing import Optional, Set, Union
+import typing
 import logging
 
 # Import the alt generation function
@@ -1120,64 +1121,140 @@ class AdminCog(commands.Cog):
 
     @commands.hybrid_command(
         name="dm",
-        description="Send a direct message to a user"
+        description="Send a direct message to a user or all members with a role"
     )
     @commands.has_permissions(manage_messages=True)
-    async def dm(self, ctx, user: discord.User, *, message: str):
-        """Send a direct message to a user."""
+    async def dm(self, ctx, target: typing.Union[discord.User, discord.Role], *, message: str):
+        """Send a direct message to a user or all members with a role."""
         try:
-            # Send the DM
-            await user.send(message)
+            # Auto-delete the command message for prefix commands only
+            if not ctx.interaction:
+                try:
+                    await ctx.message.delete()
+                except discord.NotFound:
+                    pass  # Message already deleted
+                except discord.Forbidden:
+                    pass  # No permission to delete
             
-            # Check if it's a slash command (interaction) or prefix command
-            if ctx.interaction:
-                # For slash commands, send ephemeral (auto-hidden)
-                await ctx.send(
-                    f"✅ Direct message sent to {user.display_name}!",
-                    ephemeral=True
+            # Check if target is a role
+            if isinstance(target, discord.Role):
+                # Get all members with this role
+                members_with_role = [member for member in ctx.guild.members if target in member.roles and not member.bot]
+                
+                if not members_with_role:
+                    if ctx.interaction:
+                        await ctx.send(f"❌ No members found with the role {target.name}.", ephemeral=True)
+                    else:
+                        await ctx.send(f"❌ No members found with the role {target.name}.", delete_after=3)
+                    return
+                
+                # Send DM to all members with the role
+                successful_dms = 0
+                failed_dms = 0
+                
+                for member in members_with_role:
+                    try:
+                        await member.send(message)
+                        successful_dms += 1
+                    except (discord.Forbidden, discord.HTTPException):
+                        failed_dms += 1
+                
+                # Send summary
+                total_members = len(members_with_role)
+                summary = f"📨 **Role DM Summary for {target.name}:**\n✅ Sent: {successful_dms}/{total_members}\n❌ Failed: {failed_dms}/{total_members}"
+                
+                if ctx.interaction:
+                    await ctx.send(summary, ephemeral=True)
+                else:
+                    await ctx.send(summary, delete_after=10)
+                
+                # Log the action
+                self.logger.info(
+                    "Role DM sent to %s members with role %s by %s in %s: %s (Success: %d, Failed: %d)",
+                    total_members,
+                    target.name,
+                    ctx.author,
+                    ctx.guild.name,
+                    message,
+                    successful_dms,
+                    failed_dms
                 )
+                
             else:
-                # For prefix commands, send and auto-delete after 1 second
-                await ctx.send(
-                    f"✅ Direct message sent to {user.display_name}!",
-                    delete_after=1
+                # Target is a user, send single DM
+                await target.send(message)
+                
+                # Check if it's a slash command (interaction) or prefix command
+                if ctx.interaction:
+                    # For slash commands, send ephemeral (auto-hidden)
+                    await ctx.send(
+                        f"✅ Direct message sent to {target.display_name}!",
+                        ephemeral=True
+                    )
+                else:
+                    # For prefix commands, send and auto-delete after 1 second
+                    await ctx.send(
+                        f"✅ Direct message sent to {target.display_name}!",
+                        delete_after=1
+                    )
+                
+                # Log the action
+                self.logger.info(
+                    "DM sent to %s by %s in %s: %s",
+                    target,
+                    ctx.author,
+                    ctx.guild.name,
+                    message
                 )
-            
-            # Log the action
-            self.logger.info(
-                "DM sent to %s by %s in %s: %s",
-                user,
-                ctx.author,
-                ctx.guild.name,
-                message
-            )
             
         except discord.Forbidden:
-            if ctx.interaction:
-                await ctx.send(
-                    f"❌ Could not send DM to {user.display_name}. "
-                    "They may have DMs disabled or blocked the bot.",
-                    ephemeral=True
-                )
-            else:
-                await ctx.send(
-                    f"❌ Could not send DM to {user.display_name}. "
-                    "They may have DMs disabled or blocked the bot.",
-                    delete_after=3
-                )
+            # Auto-delete the command message for prefix commands only
+            if not ctx.interaction:
+                try:
+                    await ctx.message.delete()
+                except discord.NotFound:
+                    pass  # Message already deleted
+                except discord.Forbidden:
+                    pass  # No permission to delete
+            
+            # Only handle single user DM failures here (role DMs handle their own errors)
+            if isinstance(target, discord.User):
+                if ctx.interaction:
+                    await ctx.send(
+                        f"❌ Could not send DM to {target.display_name}. "
+                        "They may have DMs disabled or blocked the bot.",
+                        ephemeral=True
+                    )
+                else:
+                    await ctx.send(
+                        f"❌ Could not send DM to {target.display_name}. "
+                        "They may have DMs disabled or blocked the bot.",
+                        delete_after=3
+                    )
             
         except discord.HTTPException as e:
-            if ctx.interaction:
-                await ctx.send(
-                    f"❌ Failed to send DM to {user.display_name}: {e}",
-                    ephemeral=True
-                )
-            else:
-                await ctx.send(
-                    f"❌ Failed to send DM to {user.display_name}: {e}",
-                    delete_after=3
-                )
-            self.logger.error("Failed to send DM to %s: %s", user, e)
+            # Auto-delete the command message for prefix commands only
+            if not ctx.interaction:
+                try:
+                    await ctx.message.delete()
+                except discord.NotFound:
+                    pass  # Message already deleted
+                except discord.Forbidden:
+                    pass  # No permission to delete
+            
+            # Only handle single user DM failures here (role DMs handle their own errors)
+            if isinstance(target, discord.User):
+                if ctx.interaction:
+                    await ctx.send(
+                        f"❌ Failed to send DM to {target.display_name}: {e}",
+                        ephemeral=True
+                    )
+                else:
+                    await ctx.send(
+                        f"❌ Failed to send DM to {target.display_name}: {e}",
+                        delete_after=3
+                    )
+                self.logger.error("Failed to send DM to %s: %s", target, e)
 
     # =========================================================
     # STATUS COMMAND
