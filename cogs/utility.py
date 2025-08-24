@@ -1053,11 +1053,11 @@ class UtilityCog(commands.Cog):
         if ',' in location:
             # Already has country code (e.g., "10001,US" or "SW1A 1AA,GB")
             return f"zip={location}"
-        elif location.replace(' ', '').isdigit():
-            # Numeric only - assume US zip code
+        elif location.isdigit():
+            # All digits - assume US zip code (handles both 5-digit like 89146 and 9-digit like 100011234)
             return f"zip={location},US"
-        elif len(location) == 5 and location.isdigit():
-            # 5-digit number - US zip code
+        elif location.replace(' ', '').replace('-', '').isdigit():
+            # Digits with spaces or hyphens - assume zip code
             return f"zip={location},US"
         else:
             # Assume it's a city name

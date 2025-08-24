@@ -6,6 +6,7 @@ Contains all moderation-related slash commands like kick, ban, timeout, etc.
 
 import logging
 import re
+import asyncio
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -197,12 +198,187 @@ class ModerationCog(commands.Cog):
         except discord.HTTPException as e:
             await interaction.response.send_message(f"❌ Failed to ban user: {e}", ephemeral=True)
 
+    # Tempban
+    @app_commands.command(name="tempban", description="Temporarily ban a member or user from the server")
+    @app_commands.describe(
+        target="The member/user to temporarily ban (mention, ID, or username)",
+        duration="Duration (e.g., 1h, 30m, 1d, 2w)",
+        reason="Reason for the temporary ban",
+        delete_messages="Number of days of messages to delete (0-7)"
+    )
+    async def tempban(self, interaction: discord.Interaction, target: str, duration: str, reason: Optional[str] = "No reason provided", delete_messages: Optional[int] = 0):
+        if delete_messages is not None and (delete_messages < 0 or delete_messages > 7):
+            return await interaction.response.send_message("❌ Delete messages must be between 0 and 7 days.", ephemeral=True)
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+        if not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("❌ You must be a member of this server to use this command.", ephemeral=True)
+        
+        # Parse duration
+        ban_duration = self._parse_duration(duration)
+        if not ban_duration:
+            return await interaction.response.send_message("❌ Invalid duration format. Use formats like: 1h, 30m, 1d, 2w", ephemeral=True)
+        
+        # Try to resolve the target (member, user ID, or fetch user)
+        member = None
+        user = None
+        user_id = None
+        
+        # First, try to convert target to member if they're in the server
+        try:
+            # Try to get member by mention or ID
+            if target.startswith('<@') and target.endswith('>'):
+                user_id = int(target.strip('<@!>'))
+            elif target.isdigit():
+                user_id = int(target)
+            else:
+                # Try to find member by username/display name
+                for m in interaction.guild.members:
+                    if m.name.lower() == target.lower() or m.display_name.lower() == target.lower():
+                        member = m
+                        break
+            
+            if user_id and not member:
+                member = interaction.guild.get_member(user_id)
+            
+        except ValueError:
+            pass
+        
+        # If we found a member, do permission checks
+        if member:
+            if not has_moderation_permissions(interaction.user, member):
+                return await interaction.response.send_message("❌ You don't have permission to ban this member.", ephemeral=True)
+            if not has_higher_role(interaction.guild.me, member):
+                return await interaction.response.send_message("❌ I cannot ban this member due to role hierarchy.", ephemeral=True)
+            user = member
+        else:
+            # User not in server, try to fetch user object
+            if not user_id:
+                return await interaction.response.send_message("❌ Could not find that user. Please provide a valid user ID, mention, or username of someone in the server.", ephemeral=True)
+            
+            # Check if user has ban permissions for hackbans
+            if not interaction.user.guild_permissions.ban_members:
+                return await interaction.response.send_message("❌ You need ban permissions to ban users not in the server.", ephemeral=True)
+            
+            try:
+                user = await self.bot.fetch_user(user_id)
+            except discord.NotFound:
+                return await interaction.response.send_message("❌ User not found.", ephemeral=True)
+            except discord.HTTPException:
+                return await interaction.response.send_message("❌ Failed to fetch user information.", ephemeral=True)
+
+        # Check if user is already banned
+        try:
+            ban_entry = await interaction.guild.fetch_ban(user)
+            return await interaction.response.send_message(f"❌ {user.mention} is already banned.", ephemeral=True)
+        except discord.NotFound:
+            pass  # User is not banned, continue
+        except discord.Forbidden:
+            return await interaction.response.send_message("❌ I don't have permission to check bans.", ephemeral=True)
+
+        # Try to DM the user (best effort)
+        if member:  # Only try to DM if they're in the server
+            try:
+                unban_time = discord.utils.utcnow() + ban_duration
+                dm = discord.Embed(
+                    title=f"You were temporarily banned from {interaction.guild.name}",
+                    description=f"***Reason:*** {reason}\n***Duration:*** {duration}\n***Unban Time:*** <t:{int(unban_time.timestamp())}:F>",
+                    color=discord.Color.red(),
+                    timestamp=discord.utils.utcnow()
+                )
+                if interaction.guild.icon:
+                    dm.set_thumbnail(url=interaction.guild.icon.url)
+                await user.send(embed=dm)
+            except Exception:
+                pass
+
+        try:
+            await interaction.guild.ban(user, reason=f"Tempban by {interaction.user}: {reason} (Duration: {duration})", delete_message_days=delete_messages or 0)
+            
+            # Schedule unban
+            unban_time = discord.utils.utcnow() + ban_duration
+            self.bot.loop.create_task(self._schedule_unban(interaction.guild, user, ban_duration))
+            
+            # Create success embed
+            e = self._dyno_style_embed("temporarily banned", user, reason)
+            e.description += f"\n***Duration:*** {duration}\n***Unban Time:*** <t:{int(unban_time.timestamp())}:R>"
+            if delete_messages:
+                e.description += f"\n***Messages Deleted:*** {delete_messages} day(s)"
+            e.set_footer(text=f"User ID: {user.id}")
+            await interaction.response.send_message(embed=e)
+            
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ I don't have permission to ban this user.", ephemeral=True)
+        except discord.HTTPException as e:
+            await interaction.response.send_message(f"❌ Failed to ban user: {e}", ephemeral=True)
+
+    def _parse_duration(self, duration_str: str) -> Optional[timedelta]:
+        """Parse duration string like '1h', '30m', '1d', '2w' into timedelta."""
+        import re
+        
+        # Match number followed by unit
+        match = re.match(r'^(\d+)([smhdw])$', duration_str.lower())
+        if not match:
+            return None
+        
+        amount, unit = match.groups()
+        amount = int(amount)
+        
+        if unit == 's':
+            return timedelta(seconds=amount)
+        elif unit == 'm':
+            return timedelta(minutes=amount)
+        elif unit == 'h':
+            return timedelta(hours=amount)
+        elif unit == 'd':
+            return timedelta(days=amount)
+        elif unit == 'w':
+            return timedelta(weeks=amount)
+        
+        return None
+    
+    async def _schedule_unban(self, guild: discord.Guild, user: discord.User, duration: timedelta):
+        """Schedule an unban after the specified duration."""
+        await asyncio.sleep(duration.total_seconds())
+        
+        try:
+            # Check if user is still banned
+            await guild.fetch_ban(user)
+            # If we get here, user is still banned, so unban them
+            await guild.unban(user, reason="Temporary ban expired")
+            
+            # Try to DM the user about the unban (best effort)
+            try:
+                unban_embed = discord.Embed(
+                    title=f"Your temporary ban from {guild.name} has expired",
+                    description="You have been automatically unbanned and can now rejoin the server.",
+                    color=discord.Color.green(),
+                    timestamp=discord.utils.utcnow()
+                )
+                if guild.icon:
+                    unban_embed.set_thumbnail(url=guild.icon.url)
+                await user.send(embed=unban_embed)
+                self.logger.info(f"Successfully sent auto-unban DM to {user} ({user.id})")
+            except discord.Forbidden:
+                self.logger.warning(f"Failed to send auto-unban DM to {user} ({user.id}) - user has DMs disabled or blocked the bot")
+            except discord.HTTPException as e:
+                self.logger.warning(f"Failed to send auto-unban DM to {user} ({user.id}) - HTTP error: {e}")
+            except Exception as e:
+                self.logger.warning(f"Failed to send auto-unban DM to {user} ({user.id}) - unexpected error: {e}")
+            
+            self.logger.info(f"Automatically unbanned {user} ({user.id}) from {guild.name} - tempban expired")
+        except discord.NotFound:
+            # User is not banned anymore
+            pass
+        except discord.Forbidden:
+            self.logger.error(f"Failed to auto-unban {user} ({user.id}) from {guild.name} - missing permissions")
+        except Exception as e:
+            self.logger.error(f"Failed to auto-unban {user} ({user.id}) from {guild.name}: {e}")
+
     # Timeout
     @app_commands.command(name="timeout", description="Timeout a member")
-    @app_commands.describe(member="The member to timeout", duration="Duration in minutes (max 40320 = 28 days)", reason="Reason for the timeout")
-    async def timeout(self, interaction: discord.Interaction, member: discord.Member, duration: int, reason: Optional[str] = "No reason provided"):
-        if duration <= 0 or duration > 40320:
-            return await interaction.response.send_message("❌ Duration must be between 1 and 40320 minutes (28 days).", ephemeral=True)
+    @app_commands.describe(member="The member to timeout", duration="Duration (e.g., 30m, 1h, 2d)", reason="Reason for the timeout")
+    async def timeout(self, interaction: discord.Interaction, member: discord.Member, duration: str, reason: Optional[str] = "No reason provided"):
         if not interaction.guild:
             return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
         if not isinstance(interaction.user, discord.Member):
@@ -212,14 +388,25 @@ class ModerationCog(commands.Cog):
         if not has_higher_role(interaction.guild.me, member):
             return await interaction.response.send_message("❌ I cannot timeout this member due to role hierarchy.", ephemeral=True)
 
-        until = discord.utils.utcnow() + timedelta(minutes=duration)
+        # Parse duration
+        timeout_duration = self._parse_duration(duration)
+        if not timeout_duration:
+            return await interaction.response.send_message("❌ Invalid duration format. Use formats like: 30m, 1h, 2d", ephemeral=True)
+        
+        # Check if duration is within Discord's limits (max 28 days)
+        max_duration = timedelta(days=28)
+        if timeout_duration > max_duration:
+            return await interaction.response.send_message("❌ Duration cannot exceed 28 days.", ephemeral=True)
+            return await interaction.response.send_message("❌ I cannot timeout this member due to role hierarchy.", ephemeral=True)
+
+        until = discord.utils.utcnow() + timeout_duration
 
         # DM best-effort
         try:
             dm = discord.Embed(
                 title=f"You were timed out in {interaction.guild.name}",
                 description=(
-                    f"***Duration:*** {duration} minutes\n"
+                    f"***Duration:*** {duration}\n"
                     f"***Until:*** {discord.utils.format_dt(until, style='F')}\n"
                     f"***Reason:*** {reason}"
                 ),
@@ -235,7 +422,7 @@ class ModerationCog(commands.Cog):
         try:
             await member.timeout(until, reason=f"Timed out by staff: {reason}")
             e = self._dyno_style_embed("timed out", member, reason)
-            e.description += f"\n***Until:*** {discord.utils.format_dt(until, style='F')} • ***Duration:*** {duration}m"
+            e.description += f"\n***Until:*** {discord.utils.format_dt(until, style='F')} • ***Duration:*** {duration}"
             e.set_footer(text=f"User ID: {member.id}")
             await interaction.response.send_message(embed=e)
         except discord.Forbidden:
@@ -292,6 +479,26 @@ class ModerationCog(commands.Cog):
                 return await interaction.response.send_message("❌ This user is not banned from this server.", ephemeral=True)
 
             await interaction.guild.unban(user, reason=f"Unbanned by staff: {reason}")
+            
+            # Try to DM the user about the unban (best effort)
+            try:
+                unban_embed = discord.Embed(
+                    title=f"You have been unbanned from {interaction.guild.name}",
+                    description=f"You have been unbanned by a staff member and can now rejoin the server.\n\n**Reason:** {reason}",
+                    color=discord.Color.green(),
+                    timestamp=discord.utils.utcnow()
+                )
+                if interaction.guild.icon:
+                    unban_embed.set_thumbnail(url=interaction.guild.icon.url)
+                await user.send(embed=unban_embed)
+                self.logger.info(f"Successfully sent manual unban DM to {user} ({user.id})")
+            except discord.Forbidden:
+                self.logger.warning(f"Failed to send manual unban DM to {user} ({user.id}) - user has DMs disabled or blocked the bot")
+            except discord.HTTPException as e:
+                self.logger.warning(f"Failed to send manual unban DM to {user} ({user.id}) - HTTP error: {e}")
+            except Exception as e:
+                self.logger.warning(f"Failed to send manual unban DM to {user} ({user.id}) - unexpected error: {e}")
+            
             e = self._dyno_style_embed("unbanned", user, reason)
             e.set_footer(text=f"User ID: {user.id}")
             await interaction.response.send_message(embed=e)
@@ -631,11 +838,127 @@ class ModerationCog(commands.Cog):
         except discord.HTTPException as e:
             await ctx.send(f"❌ Failed to ban user: {e}", delete_after=5)
 
-    @commands.command(name="timeout")
-    async def prefix_timeout(self, ctx, member: discord.Member, minutes: int, *, reason="No reason provided"):
+    @commands.command(name="tempban")
+    async def prefix_tempban(self, ctx, target: str, duration: str, *, reason="No reason provided"):
+        """Temporarily ban a member or user from the server (prefix version)."""
+        if not ctx.guild:
+            return await ctx.send("❌ This command can only be used in a server.", delete_after=5)
+        if not isinstance(ctx.author, discord.Member):
+            return await ctx.send("❌ You must be a member of this server to use this command.", delete_after=5)
+        
+        # Auto-delete command message
         await self.delete_command_message(ctx)
-        if minutes <= 0 or minutes > 40320:
-            return await ctx.send("❌ Duration must be between 1 and 40320 minutes (28 days).", delete_after=5)
+        
+        # Parse duration
+        ban_duration = self._parse_duration(duration)
+        if not ban_duration:
+            return await ctx.send("❌ Invalid duration format. Use formats like: 1h, 30m, 1d, 2w", delete_after=5)
+        
+        # Try to resolve the target (member, user ID, or fetch user)
+        member = None
+        user = None
+        user_id = None
+        
+        # First, try to convert target to member if they're in the server
+        try:
+            # Try to get member by mention or ID
+            if target.startswith('<@') and target.endswith('>'):
+                user_id = int(target.strip('<@!>'))
+            elif target.isdigit():
+                user_id = int(target)
+            else:
+                # Try to find member by username/display name
+                for m in ctx.guild.members:
+                    if m.name.lower() == target.lower() or m.display_name.lower() == target.lower():
+                        member = m
+                        break
+            
+            if user_id and not member:
+                member = ctx.guild.get_member(user_id)
+            
+        except ValueError:
+            pass
+        
+        # If we found a member, do permission checks
+        if member:
+            if not has_moderation_permissions(ctx.author, member):
+                return await ctx.send("❌ You don't have permission to ban this member.", delete_after=5)
+            if not has_higher_role(ctx.guild.me, member):
+                return await ctx.send("❌ I cannot ban this member due to role hierarchy.", delete_after=5)
+            user = member
+        else:
+            # User not in server, try to fetch user object
+            if not user_id:
+                return await ctx.send("❌ Could not find that user. Please provide a valid user ID, mention, or username of someone in the server.", delete_after=5)
+            
+            # Check if user has ban permissions for hackbans
+            if not ctx.author.guild_permissions.ban_members:
+                return await ctx.send("❌ You need ban permissions to ban users not in the server.", delete_after=5)
+            
+            try:
+                user = await self.bot.fetch_user(user_id)
+            except discord.NotFound:
+                return await ctx.send("❌ User not found.", delete_after=5)
+            except discord.HTTPException:
+                return await ctx.send("❌ Failed to fetch user information.", delete_after=5)
+
+        # Check if user is already banned
+        try:
+            ban_entry = await ctx.guild.fetch_ban(user)
+            return await ctx.send(f"❌ {user.mention} is already banned.", delete_after=5)
+        except discord.NotFound:
+            pass  # User is not banned, continue
+        except discord.Forbidden:
+            return await ctx.send("❌ I don't have permission to check bans.", delete_after=5)
+
+        # Try to DM the user (best effort)
+        if member:  # Only try to DM if they're in the server
+            try:
+                unban_time = discord.utils.utcnow() + ban_duration
+                dm = discord.Embed(
+                    title=f"You were temporarily banned from {ctx.guild.name}",
+                    description=f"***Reason:*** {reason}\n***Duration:*** {duration}\n***Unban Time:*** <t:{int(unban_time.timestamp())}:F>",
+                    color=discord.Color.red(),
+                    timestamp=discord.utils.utcnow()
+                )
+                if ctx.guild.icon:
+                    dm.set_thumbnail(url=ctx.guild.icon.url)
+                await user.send(embed=dm)
+            except Exception:
+                pass
+
+        try:
+            await ctx.guild.ban(user, reason=f"Tempban by {ctx.author}: {reason} (Duration: {duration})", delete_message_days=0)
+            
+            # Schedule unban
+            unban_time = discord.utils.utcnow() + ban_duration
+            self.bot.loop.create_task(self._schedule_unban(ctx.guild, user, ban_duration))
+            
+            # Create success embed
+            e = self._dyno_style_embed("temporarily banned", user, reason)
+            e.description += f"\n***Duration:*** {duration}\n***Unban Time:*** <t:{int(unban_time.timestamp())}:R>"
+            e.set_footer(text=f"User ID: {user.id}")
+            await ctx.send(embed=e)
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to ban this user.", delete_after=5)
+        except discord.HTTPException as e:
+            await ctx.send(f"❌ Failed to ban user: {e}", delete_after=5)
+
+    @commands.command(name="timeout")
+    async def prefix_timeout(self, ctx, member: discord.Member, duration: str, *, reason="No reason provided"):
+        await self.delete_command_message(ctx)
+        
+        # Parse duration
+        timeout_duration = self._parse_duration(duration)
+        if not timeout_duration:
+            return await ctx.send("❌ Invalid duration format. Use formats like: 30m, 1h, 2d", delete_after=5)
+        
+        # Check if duration is within Discord's limits (max 28 days)
+        max_duration = timedelta(days=28)
+        if timeout_duration > max_duration:
+            return await ctx.send("❌ Duration cannot exceed 28 days.", delete_after=5)
+            
         if not isinstance(ctx.author, discord.Member) or not ctx.guild:
             return
         if not has_moderation_permissions(ctx.author, member):
@@ -643,13 +966,13 @@ class ModerationCog(commands.Cog):
         if not has_higher_role(ctx.guild.me, member):
             return await ctx.send("❌ I cannot timeout this member due to role hierarchy.", delete_after=5)
 
-        until = discord.utils.utcnow() + timedelta(minutes=minutes)
+        until = discord.utils.utcnow() + timeout_duration
 
         try:
             dm = discord.Embed(
                 title=f"You were timed out in {ctx.guild.name}",
                 description=(
-                    f"***Duration:*** {minutes} minutes\n"
+                    f"***Duration:*** {duration}\n"
                     f"***Until:*** {discord.utils.format_dt(until, style='F')}\n"
                     f"***Reason:*** {reason}"
                 ),
@@ -665,7 +988,7 @@ class ModerationCog(commands.Cog):
         try:
             await member.timeout(until, reason=f"Timed out by staff: {reason}")
             e = self._dyno_style_embed("timed out", member, reason)
-            e.description += f"\n***Until:*** {discord.utils.format_dt(until, style='F')} • ***Duration:*** {minutes}m"
+            e.description += f"\n***Until:*** {discord.utils.format_dt(until, style='F')} • ***Duration:*** {duration}"
             e.set_footer(text=f"User ID: {member.id}")
             await ctx.send(embed=e)
         except discord.Forbidden:
@@ -716,6 +1039,26 @@ class ModerationCog(commands.Cog):
                 return await ctx.send("❌ That user is not banned from this server.", delete_after=5)
 
             await ctx.guild.unban(user, reason=f"Unbanned by staff: {reason}")
+            
+            # Try to DM the user about the unban (best effort)
+            try:
+                unban_embed = discord.Embed(
+                    title=f"You have been unbanned from {ctx.guild.name}",
+                    description=f"You have been unbanned by a staff member and can now rejoin the server.\n\n**Reason:** {reason}",
+                    color=discord.Color.green(),
+                    timestamp=discord.utils.utcnow()
+                )
+                if ctx.guild.icon:
+                    unban_embed.set_thumbnail(url=ctx.guild.icon.url)
+                await user.send(embed=unban_embed)
+                self.logger.info(f"Successfully sent manual unban DM to {user} ({user.id})")
+            except discord.Forbidden:
+                self.logger.warning(f"Failed to send manual unban DM to {user} ({user.id}) - user has DMs disabled or blocked the bot")
+            except discord.HTTPException as e:
+                self.logger.warning(f"Failed to send manual unban DM to {user} ({user.id}) - HTTP error: {e}")
+            except Exception as e:
+                self.logger.warning(f"Failed to send manual unban DM to {user} ({user.id}) - unexpected error: {e}")
+            
             e = self._dyno_style_embed("unbanned", user, reason)
             e.set_footer(text=f"User ID: {user.id}")
             await ctx.send(embed=e)

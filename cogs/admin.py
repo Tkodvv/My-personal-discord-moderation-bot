@@ -1233,7 +1233,7 @@ class AdminCog(commands.Cog):
         description="Send a direct message to a user or all members with a role"
     )
     @commands.has_permissions(manage_messages=True)
-    async def dm(self, ctx, target: typing.Union[discord.User, discord.Role], *, message: str):
+    async def dm(self, ctx, target: typing.Union[discord.User, discord.Role], *, message: str = None):
         """Send a direct message to a user or all members with a role."""
         try:
             # Auto-delete the command message for prefix commands only
@@ -1244,6 +1244,24 @@ class AdminCog(commands.Cog):
                     pass  # Message already deleted
                 except discord.Forbidden:
                     pass  # No permission to delete
+            
+            # Get attachments from the original message (for prefix commands)
+            attachments = []
+            if not ctx.interaction and ctx.message.attachments:
+                # For prefix commands, get attachments from the message
+                for attachment in ctx.message.attachments:
+                    # Convert attachment to discord.File for sending
+                    file_data = await attachment.read()
+                    attachments.append(discord.File(io.BytesIO(file_data), filename=attachment.filename))
+            
+            # Check if we have either message or attachments
+            if not message and not attachments:
+                error_msg = "❌ Please provide either a message or attach files to send."
+                if ctx.interaction:
+                    await ctx.send(error_msg, ephemeral=True)
+                else:
+                    await ctx.send(error_msg, delete_after=3, allowed_mentions=discord.AllowedMentions.none())
+                return
             
             # Check if target is a role
             if isinstance(target, discord.Role):
@@ -1268,14 +1286,30 @@ class AdminCog(commands.Cog):
                 
                 for member in members_with_role:
                     try:
-                        await member.send(message)
+                        # Create new file objects for each send (Discord requires this)
+                        member_files = []
+                        if attachments:
+                            # Re-read the files for each member
+                            if not ctx.interaction and ctx.message.attachments:
+                                for attachment in ctx.message.attachments:
+                                    file_data = await attachment.read()
+                                    member_files.append(discord.File(io.BytesIO(file_data), filename=attachment.filename))
+                        
+                        if message and member_files:
+                            await member.send(content=message, files=member_files)
+                        elif message:
+                            await member.send(content=message)
+                        elif member_files:
+                            await member.send(files=member_files)
+                        
                         successful_dms += 1
                     except (discord.Forbidden, discord.HTTPException):
                         failed_dms += 1
                 
                 # Send summary (use role name, not mention to avoid ping)
                 total_members = len(members_with_role)
-                summary = f"📨 **Role DM Summary for `{target.name}`:**\n✅ Sent: {successful_dms}/{total_members}\n❌ Failed: {failed_dms}/{total_members}"
+                attachment_info = f" with {len(attachments)} attachment(s)" if attachments else ""
+                summary = f"📨 **Role DM Summary for `{target.name}`{attachment_info}:**\n✅ Sent: {successful_dms}/{total_members}\n❌ Failed: {failed_dms}/{total_members}"
                 
                 if ctx.interaction:
                     await ctx.send(summary, ephemeral=True)
@@ -1297,23 +1331,57 @@ class AdminCog(commands.Cog):
                 
             else:
                 # Target is a user, send single DM
-                await target.send(message)
-                
-                # Check if it's a slash command (interaction) or prefix command
-                if ctx.interaction:
-                    # For slash commands, send ephemeral (auto-hidden)
-                    await ctx.send(
-                        f"✅ Direct message sent to {target.display_name}!",
-                        ephemeral=True
+                try:
+                    # Create file objects for user DM
+                    user_files = []
+                    if attachments:
+                        # Re-read the files for the user
+                        if not ctx.interaction and ctx.message.attachments:
+                            for attachment in ctx.message.attachments:
+                                file_data = await attachment.read()
+                                user_files.append(discord.File(io.BytesIO(file_data), filename=attachment.filename))
+                    
+                    # Send the DM with message and/or attachments
+                    if message and user_files:
+                        await target.send(content=message, files=user_files)
+                    elif message:
+                        await target.send(content=message)
+                    elif user_files:
+                        await target.send(files=user_files)
+                    
+                    # Success message
+                    attachment_info = f" with {len(attachments)} attachment(s)" if attachments else ""
+                    success_msg = f"✅ Direct message sent to {target.display_name}{attachment_info}!"
+                    
+                    # Check if it's a slash command (interaction) or prefix command
+                    if ctx.interaction:
+                        # For slash commands, send ephemeral (auto-hidden)
+                        await ctx.send(success_msg, ephemeral=True)
+                    else:
+                        # For prefix commands, send and auto-delete after 1 second
+                        # Use allowed_mentions to prevent any accidental user pings
+                        await ctx.send(
+                            f"✅ Direct message sent to **{target.display_name}**{attachment_info}!",
+                            delete_after=1,
+                            allowed_mentions=discord.AllowedMentions.none()
+                        )
+                    
+                    # Log the action
+                    self.logger.info(
+                        "User DM sent to %s by %s in %s: %s (Attachments: %d)",
+                        target,
+                        ctx.author,
+                        ctx.guild.name,
+                        message,
+                        len(attachments)
                     )
-                else:
-                    # For prefix commands, send and auto-delete after 1 second
-                    # Use allowed_mentions to prevent any accidental user pings
-                    await ctx.send(
-                        f"✅ Direct message sent to **{target.display_name}**!",
-                        delete_after=1,
-                        allowed_mentions=discord.AllowedMentions.none()
-                    )
+                    
+                except (discord.Forbidden, discord.HTTPException) as e:
+                    error_msg = f"❌ Failed to send DM to {target.display_name}. They may have DMs disabled or blocked the bot."
+                    if ctx.interaction:
+                        await ctx.send(error_msg, ephemeral=True)
+                    else:
+                        await ctx.send(error_msg, delete_after=5, allowed_mentions=discord.AllowedMentions.none())
                 
                 # Log the action
                 self.logger.info(
