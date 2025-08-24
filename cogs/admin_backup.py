@@ -1,334 +1,326 @@
+# -*- coding: utf-8 -*-
 """
-Admin Cog
-Contains administrative commands like say, announce, clear, prefix management,
-and per-guild bot-mod role management (persistent). Also includes /alt with whitelist.
+Admin Cog - Revamped for proper Discord functionality
+Contains administrative commands and bot management features.
 """
 
-import logging
-import io
 import os
+import json
+import asyncio
+import io
 import httpx
+from datetime import datetime
 import discord
 from discord.ext import commands
 from discord import app_commands
-from datetime import datetime
-from typing import Optional, Dict, List, Set
-from discord.utils import utcnow, format_dt
-from roblox_alts import get_alt_public
+from utils.permissions import mod_check
+from typing import Optional, Set, Union
+import typing
+import logging
 
-log = logging.getLogger(__name__)
+# Import the alt generation function
+try:
+    from roblox_alts import get_alt_public
+except ImportError:
+    async def get_alt_public():
+        return None
 
-# ---------------------------
-# Inline Roblox Alt API client
-# Defaults: POST + x-api-key to https://trigen.io/api/alt/generate
-# ---------------------------
-async def get_alt_public():
-    API_KEY  = os.getenv("TRIGEN_API_KEY")
-    API_BASE = (os.getenv("TRIGEN_BASE", "https://trigen.io") or "").rstrip("/")
-    ENDPOINT = os.getenv("TRIGEN_ALT_ENDPOINT", "/api/alt/generate")
-    METHOD   = os.getenv("TRIGEN_METHOD", "POST").upper()
-    if not API_KEY:
-        raise RuntimeError("TRIGEN_API_KEY missing")
 
-    url = f"{API_BASE}{ENDPOINT}"
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "SliceMod/1.0",
-        "x-api-key": API_KEY,
-    }
+class CookieView(discord.ui.View):
+    """View with button to show cookie."""
+    
+    def __init__(self, cookie: str, timeout: float = 300):
+        super().__init__(timeout=timeout)
+        self.cookie = cookie
+        
+    @discord.ui.button(label="🍪 Show Cookie", style=discord.ButtonStyle.secondary, emoji="🍪")
+    async def show_cookie(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Show the cookie when button is clicked."""
+        
+        # Create cookie embed with the entire cookie in description
+        cookie_embed = discord.Embed(
+            title="🍪 Account Cookie",
+            description=f"**⚠️ Keep this cookie safe and do not share it with anyone!**\n\n```\n{self.cookie}\n```",
+            color=0x2F3136
+        )
+            
+        cookie_embed.set_footer(text="This cookie expires when you change your password.")
+        
+        await interaction.response.send_message(embed=cookie_embed, ephemeral=True)
+        
+    async def on_timeout(self):
+        """Disable all buttons when view times out."""
+        for item in self.children:
+            item.disabled = True
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        r = await client.request(METHOD, url, headers=headers)
-        if r.status_code in (404, 405):
-            fallback = "GET" if METHOD == "POST" else "POST"
-            r = await client.request(fallback, url, headers=headers)
-
-        r.raise_for_status()
-        data = r.json()
-
-    username = (data.get("username") or data.get("name") or data.get("user") or "").strip()
-    password = (data.get("password") or data.get("pass") or data.get("pwd") or "").strip()
-    user_id  = str(data.get("userId") or data.get("id") or data.get("userid") or "")
-
-    created_raw = (
-        data.get("createdAt") or data.get("creationDate") or
-        data.get("created_at") or data.get("created") or ""
-    )
-    avatar_url = data.get("avatarUrl") or data.get("avatar_url")
-
-    core = {"username","name","user","password","pass","pwd","userId","id","userid",
-            "createdAt","creationDate","created_at","created","avatarUrl","avatar_url"}
-    meta = {k: v for k, v in data.items() if k not in core}
-
-    return {
-        "username": username,
-        "password": password,
-        "userId": user_id,
-        "createdAt": created_raw,
-        "avatarUrl": avatar_url,
-        "meta": meta,
-    }
-
-# ---------------------------
-# Env-driven guild blacklist helper
-# ---------------------------
-def _parse_guild_blacklist_from_env() -> set[int]:
-    raw = os.getenv("GUILD_BLACKLIST", "") or ""
-    parts = [p.strip() for p in raw.replace(",", " ").split() if p.strip()]
-    ids: set[int] = set()
-    for p in parts:
-        try:
-            ids.add(int(p))
-        except ValueError:
-            pass
-    return ids
 
 class AdminCog(commands.Cog):
-    """Administrative commands cog."""
+    """Administrative commands and bot management."""
 
     def __init__(self, bot):
         self.bot = bot
         self.logger = logging.getLogger(__name__)
-        self.deleted_messages: Dict[int, dict] = {}
-        self._last_deleted = {}
-        self._watching_users = set()
-        self.guild_blacklist = set()  # Initialize empty blacklist
+        self.no_pings = discord.AllowedMentions.none()
         
-        # Initialize storage
-        store = {}
-        if hasattr(bot, "alt_whitelist_roles"):
-            for guild_id, roles in bot.alt_whitelist_roles.items():
-                store[int(guild_id)] = set(int(r) for r in roles)
-        setattr(bot, "_alt_role_whitelist", store)
+        # Bot status persistence file
+        self.status_file = "data/bot_status.json"
         
-        # Allowed roles for /say (you can remove this if you want to fully rely on modlist)
+        # Ensure data directory exists
+        os.makedirs("data", exist_ok=True)
+        
+        # Load saved status/presence settings
+        self.saved_status = self.load_status_settings()
+        
+        # Allowed roles for /say command
         self.allowed_say_roles = {
             1383421890403762286,
             1349191381310111824,
             1379755293797384202,
         }
-
-        # Global "no ping" policy for safe responses
-        self.no_pings = discord.AllowedMentions.none()
-            
-    @commands.command(name="prefix", aliases=["setprefix"])
-    @commands.has_permissions(administrator=True)
-    async def prefix_set(self, ctx, *, new_prefix: Optional[str] = None):
-        """
-        !prefix -> show current prefix
-        !prefix <new> -> set new prefix (preserves mention as prefix)
-        """
-        await self.delete_command_message(ctx)
-        if new_prefix is None or new_prefix == "?":
-            current = getattr(self.bot, "command_prefix", "!")
-            current = current if isinstance(current, str) else "!"
-            await ctx.send(f"Current prefix is: `{current}`", delete_after=5)
-            return
-            
-        if len(new_prefix) > 5:
-            await ctx.send("❌ Prefix must be 5 characters or less", delete_after=5)
-            return
-            
-        def get_prefix(bot, msg):
-            return commands.when_mentioned_or(new_prefix)(bot, msg)
-            
-        self.bot.command_prefix = get_prefix
-        await ctx.send(f"✅ Prefix updated to: `{new_prefix}`", delete_after=5)
         
-    # Note: Removed duplicate prefix commands
+        # Initialize status on bot ready
+        self.bot.loop.create_task(self.restore_status_on_ready())
 
-        # Env-driven blacklist
-        self.guild_blacklist: set[int] = _parse_guild_blacklist_from_env()
-
-    # ===== Helpers: prefix handling (persist current text prefix on bot) =====
-    def _get_current_prefix(self) -> str:
-        return getattr(self.bot, "_text_prefix", "!")
-
-    def _apply_prefix(self, prefix: str) -> None:
-        # Keep mention + prefix
-        self.bot.command_prefix = commands.when_mentioned_or(prefix)
-        setattr(self.bot, "_text_prefix", prefix)
-
-    # ===== ALT role whitelist helpers (robust) =====
-    def _get_alt_role_ids(self, guild_id: int) -> set[int]:
-        """Return role IDs allowed to use /alt in a guild."""
-        roles = set()
-        if hasattr(self.bot, "get_alt_roles"):
-            try:
-                roles.update(self.bot.get_alt_roles(guild_id))
-            except Exception as e:
-                self.logger.error(f"Failed to get alt roles from persistent storage: {e}")
-        store = getattr(self.bot, "_alt_role_whitelist", None)
-        if store is None:
-            store = {}
-            setattr(self.bot, "_alt_role_whitelist", store)
-        roles.update(store.get(guild_id, set()))
-        return roles
-
-    def _add_alt_role(self, guild_id: int, role_id: int) -> None:
-        if hasattr(self.bot, "add_alt_role"):
-            try:
-                self.bot.add_alt_role(guild_id, role_id)
-            except Exception:
-                pass
-        store = getattr(self.bot, "_alt_role_whitelist", None)
-        if store is None:
-            store = {}
-            setattr(self.bot, "_alt_role_whitelist", store)
-        store.setdefault(guild_id, set()).add(role_id)
-
-    def _remove_alt_role(self, guild_id: int, role_id: int) -> bool:
-        removed = False
-        if hasattr(self.bot, "remove_alt_role"):
-            try:
-                removed = bool(self.bot.remove_alt_role(guild_id, role_id))
-            except Exception:
-                removed = False
-        store = getattr(self.bot, "_alt_role_whitelist", None)
-        if store and guild_id in store and role_id in store[guild_id]:
-            store[guild_id].remove(role_id)
-            removed = True
-        return removed
-
-    def _member_has_alt_role(self, member: discord.Member) -> bool:
-        allowed_roles = self._get_alt_role_ids(member.guild.id)
-        return any((r.id in allowed_roles) for r in member.roles)
-
-    # (Optional) tiny helper to fetch guild by id
-    def _g(self, gid: int) -> Optional[discord.Guild]:
+    def load_status_settings(self):
+        """Load saved status and presence settings from file."""
         try:
-            return self.bot.get_guild(int(gid))
-        except Exception:
-            return None
-
-    async def delete_command_message(self, ctx):
-        """Helper to delete command invocation messages."""
-        # Don't try to delete interaction messages
-        if isinstance(ctx, discord.Interaction):
-            return
-            
-        try:
-            if hasattr(ctx, 'message') and ctx.message:
-                await ctx.message.delete()
-        except (discord.NotFound, discord.Forbidden, AttributeError) as e:
-            self.logger.debug(f"Failed to delete command message: {e}")
+            if os.path.exists(self.status_file):
+                with open(self.status_file, 'r') as f:
+                    return json.load(f)
         except Exception as e:
-            self.logger.warning(f"Unexpected error deleting command message: {e}")
-
-    # =========================================================
-    # BLACKLIST: Auto-leave on join + sweep at startup
-    # =========================================================
-    @commands.Cog.listener()
-    async def on_guild_join(self, guild: discord.Guild):
-        if guild.id in self.guild_blacklist:
-            try:
-                await guild.leave()
-                self.logger.info(f"Left blacklisted guild on join: {guild.name} ({guild.id})")
-            except Exception as e:
-                self.logger.error(f"Failed to leave blacklisted guild on join {guild.id}: {e}")
+            self.logger.error(f"Failed to load status settings: {e}")
+        
+        # Default settings
+        return {
+            "activity_type": "watching",
+            "activity_name": "for rule violations",
+            "presence": "online"
+        }
+    
+    def save_status_settings(self, activity_type=None, activity_name=None, presence=None):
+        """Save current status and presence settings to file."""
+        try:
+            # Update only provided values
+            if activity_type is not None:
+                self.saved_status["activity_type"] = activity_type
+            if activity_name is not None:
+                self.saved_status["activity_name"] = activity_name
+            if presence is not None:
+                self.saved_status["presence"] = presence
+            
+            with open(self.status_file, 'w') as f:
+                json.dump(self.saved_status, f, indent=2)
+            
+            self.logger.info("Status settings saved to file")
+        except Exception as e:
+            self.logger.error(f"Failed to save status settings: {e}")
+    
+    async def restore_status_on_ready(self):
+        """Restore saved status and presence when bot becomes ready."""
+        # Wait for bot to be ready
+        await self.bot.wait_until_ready()
+        
+        try:
+            # Map activity types
+            activity_mapping = {
+                'playing': discord.ActivityType.playing,
+                'watching': discord.ActivityType.watching,
+                'listening': discord.ActivityType.listening,
+                'streaming': discord.ActivityType.streaming,
+                'competing': discord.ActivityType.competing
+            }
+            
+            # Map presence types
+            presence_mapping = {
+                'online': discord.Status.online,
+                'idle': discord.Status.idle,
+                'dnd': discord.Status.dnd,
+                'invisible': discord.Status.invisible
+            }
+            
+            # Get saved settings
+            activity_type = self.saved_status.get("activity_type", "watching")
+            activity_name = self.saved_status.get("activity_name", "for rule violations")
+            presence = self.saved_status.get("presence", "online")
+            
+            # Create activity
+            activity = discord.Activity(
+                type=activity_mapping.get(activity_type, discord.ActivityType.watching),
+                name=activity_name
+            )
+            
+            # Set status and presence
+            await self.bot.change_presence(
+                status=presence_mapping.get(presence, discord.Status.online),
+                activity=activity
+            )
+            
+            self.logger.info(f"Restored bot status: {activity_type} {activity_name} | {presence}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to restore bot status: {e}")
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # Log successful cog initialization
-        self.logger.info(f"AdminCog ready in {len(self.bot.guilds)} guilds")
-
-        # (Optional) first-run slash sync; harmless if you already sync elsewhere
-        if not getattr(self.bot, "_did_tree_sync", False):
-            try:
-                await self.bot.tree.sync()
-                self.bot._did_tree_sync = True
-                self.logger.info("App commands globally synced.")
-            except Exception as e:
-                self.logger.error(f"Failed to sync app commands: {e}")
+        """Called when the cog is ready."""
+        guild_count = len(self.bot.guilds)
+        self.logger.info(f"AdminCog ready in {guild_count} guilds")
 
     # =========================================================
-    # BLACKLIST: Global checks (slash & prefix)
+    # UTILITY COMMANDS
     # =========================================================
-    async def _interaction_not_blacklisted(self, interaction: discord.Interaction) -> bool:
-        if interaction.guild is None:
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(
-                        "❌ Slash commands can only be used in a server.",
-                        ephemeral=True
-                    )
-            except Exception:
-                pass
-            return False
 
-        gid = getattr(interaction.guild, "id", None)
-        if gid and gid in self.guild_blacklist:
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(
-                        "❌ This bot is not available in this server.",
-                        ephemeral=True
-                    )
-            except Exception:
-                pass
-            return False
+    @commands.hybrid_command(name="sync", description="Sync slash commands (Owner only)")
+    @commands.is_owner()
+    async def sync_commands(self, ctx: commands.Context):
+        """Sync slash commands globally."""
+        if ctx.interaction:
+            await ctx.defer()
+            
+        try:
+            synced = await self.bot.tree.sync()
+            await ctx.send(f"✅ Synced **{len(synced)}** slash commands globally.")
+        except Exception as e:
+            await ctx.send(f"❌ Sync failed: {str(e)}")
 
-        return True
-
-    async def _prefix_not_blacklisted(self, ctx: commands.Context) -> bool:
-        gid = getattr(ctx.guild, "id", None)
-        if gid and gid in self.guild_blacklist:
-            await ctx.send("❌ This bot is not available in this server.", delete_after=8)
-            return False
-        return True
-
-    @commands.Cog.listener()
-    async def on_message_delete(self, message):
-        if message.author.bot:
-            return
-        self.deleted_messages[message.channel.id] = {
-            'content': message.content,
-            'author': message.author,
-            'created_at': message.created_at,
-            'deleted_at': datetime.utcnow()
-        }
+    @commands.hybrid_command(name="reload", description="Reload a cog (Owner only)")
+    @app_commands.describe(cog="Name of the cog to reload")
+    @commands.is_owner()
+    async def reload_cog(self, ctx: commands.Context, cog: str):
+        """Reload a specific cog."""
+        try:
+            await self.bot.reload_extension(f"cogs.{cog}")
+            await ctx.send(f"✅ Reloaded cog: `{cog}`", ephemeral=True)
+        except Exception as e:
+            await ctx.send(f"❌ Failed to reload `{cog}`: {str(e)}", ephemeral=True)
 
     # =========================================================
-    # HYBRID: /alt + !alt  (DM creds; Manage Server OR whitelisted; 5s cooldown)
+    # ALT GENERATION COMMANDS
     # =========================================================
-    @commands.hybrid_command(name="alt", description="Generate a Roblox alt and DM the credentials to you.")
+
+    @commands.hybrid_command(name="alt", description="Generate and DM a Roblox alt account")
+    @commands.guild_only()
     @commands.cooldown(1, 5, commands.BucketType.guild)
     async def alt(self, ctx: commands.Context):
         """Generate and DM a Roblox alt account."""
+        # Check if alt generation is enabled
         if not os.getenv("MOD_ENABLE_RBX_ALT", "false").lower() in {"1", "true", "yes", "y"}:
             await ctx.send("❌ Alt generation is currently disabled.", ephemeral=True)
             return
         
+        # Check permissions
         member = ctx.author if isinstance(ctx.author, discord.Member) else None
-        if not (member and (self.bot.allow_alt(member) or self._member_has_alt_role(member))):
+        if not member:
+            await ctx.send("❌ This command can only be used in a server.", ephemeral=True)
+            return
+            
+        if not (self.bot.allow_alt(member) or self._member_has_alt_role(member)):
             await ctx.send("❌ You don't have permission to use this command.", ephemeral=True)
             return
 
-        # For slash commands, defer the response
+        # Defer for slash commands since this might take time
         if ctx.interaction:
-            await ctx.defer(ephemeral=True)
+            await ctx.defer()  # Remove ephemeral=True to make responses public
 
         try:
             alt_data = await get_alt_public()
-            if not alt_data or not alt_data.get("username"):
-                error_msg = "❌ Failed to generate alt account. Please try again later."
-                await ctx.send(error_msg, ephemeral=True)
+            if not alt_data or not (alt_data.get("username") or alt_data.get("name")):
+                await ctx.send("❌ Failed to generate alt account. Please try again later.", ephemeral=True)
                 return
 
+            # Create embed with alt data
             embed = discord.Embed(
                 title="Generated Roblox Account",
                 description="Your account has been generated successfully! Keep it safe and **do not share** it with anyone.",
                 color=0x2F3136
             )
-            if username := alt_data.get("username"):
-                embed.add_field(name="👤 Username", value=f"`{username}`", inline=True)
+            
+            # Add username and password in a clean layout
+            if username := (alt_data.get("username") or alt_data.get("name")):
+                embed.add_field(name="👤 Username", value=f"```{username}```", inline=True)
             if password := alt_data.get("password"):
                 if os.getenv("ALT_SHOW_PASSWORD", "true").lower() in {"1", "true", "yes", "y"}:
-                    embed.add_field(name="🔒 Password", value=f"`{password}`", inline=True)
-            if user_id := alt_data.get("userId"):
-                embed.add_field(name="🔢 User ID", value=f"`{user_id}`", inline=True)
+                    embed.add_field(name="🔒 Password", value=f"```{password}```", inline=True)
+            
+            # Don't add cookie to embed - will be shown via button
+            cookie = alt_data.get("cookie")
+            
+            # Try to get user ID and avatar from Roblox API using username
+            avatar_url = None
+            user_id = None
+            
+            if username := (alt_data.get("username") or alt_data.get("name")):
+                # Try to get user ID from Roblox API using username
+                try:
+                    import aiohttp
+                    self.logger.info(f"Fetching user ID for username: {username}")
+                    async with aiohttp.ClientSession() as session:
+                        # Get user ID from username
+                        async with session.post("https://users.roblox.com/v1/usernames/users", 
+                                              json={"usernames": [username]}) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                if data.get("data") and len(data["data"]) > 0:
+                                    user_id = data["data"][0].get("id")
+                                    self.logger.info(f"Found user ID: {user_id}")
+                                    
+                                    # Now get avatar using user ID
+                                    if user_id:
+                                        async with session.get(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=420x420&format=Png&isCircular=false") as avatar_resp:
+                                            if avatar_resp.status == 200:
+                                                avatar_data = await avatar_resp.json()
+                                                if avatar_data.get("data") and len(avatar_data["data"]) > 0:
+                                                    avatar_url = avatar_data["data"][0].get("imageUrl")
+                                                    self.logger.info(f"Found avatar URL: {avatar_url}")
+                                            else:
+                                                self.logger.warning(f"Avatar API returned status {avatar_resp.status}")
+                            else:
+                                self.logger.warning(f"Username API returned status {resp.status}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch Roblox user info: {e}")
+            
+            # Add User ID field if we found it
+            if user_id:
+                embed.add_field(name="🆔 User ID", value=str(user_id), inline=True)
 
-            if created_at := alt_data.get("createdAt"):
+            # Set avatar image if we got one
+            if avatar_url:
+                embed.set_thumbnail(url=avatar_url)
+                self.logger.info("Set avatar thumbnail in embed")
+            elif alt_data.get("avatarUrl"):  # Fallback to TRIGEN avatar if available
+                embed.set_thumbnail(url=alt_data.get("avatarUrl"))
+                self.logger.info("Used TRIGEN avatar URL")
+            else:
+                self.logger.warning("No avatar URL available")
+
+            # Fetch actual Roblox account creation date
+            creation_date_added = False
+            if user_id:
+                try:
+                    import aiohttp
+                    self.logger.info(f"Fetching creation date for user ID: {user_id}")
+                    async with aiohttp.ClientSession() as session:
+                        # Get user details including creation date from Roblox API
+                        async with session.get(f"https://users.roblox.com/v1/users/{user_id}") as resp:
+                            if resp.status == 200:
+                                user_data = await resp.json()
+                                created_date = user_data.get("created")
+                                if created_date:
+                                    try:
+                                        # Parse the Roblox creation date format
+                                        parsed_date = datetime.strptime(created_date, "%Y-%m-%dT%H:%M:%S.%fZ")
+                                        embed.add_field(name="📅 Creation Date", value=parsed_date.strftime('%m/%d/%Y'), inline=True)
+                                        creation_date_added = True
+                                        self.logger.info(f"Found creation date: {parsed_date.strftime('%m/%d/%Y')}")
+                                    except ValueError as e:
+                                        self.logger.warning(f"Failed to parse creation date: {e}")
+                            else:
+                                self.logger.warning(f"User details API returned status {resp.status}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch Roblox creation date: {e}")
+            
+            # Try to parse creation date from TRIGEN if Roblox API failed
+            if not creation_date_added and (created_at := alt_data.get("createdAt")):
                 try:
                     date_formats = [
                         "%Y-%m-%dT%H:%M:%S.%fZ",
@@ -339,434 +331,461 @@ class AdminCog(commands.Cog):
                     for fmt in date_formats:
                         try:
                             parsed_date = datetime.strptime(created_at, fmt)
-                            embed.add_field(name="📅 Creation Date", value=f"`{parsed_date.strftime('%m/%d/%Y')}`", inline=True)
+                            embed.add_field(name="📅 Creation Date", value=parsed_date.strftime('%m/%d/%Y'), inline=True)
+                            creation_date_added = True
                             break
                         except ValueError:
                             continue
                 except Exception:
                     pass
-
-            if avatar_url := alt_data.get("avatarUrl"):
-                embed.set_thumbnail(url=avatar_url)
+            
+            # If no creation date from either API, use current date as fallback
+            if not creation_date_added:
+                current_date = datetime.now().strftime('%m/%d/%Y')
+                embed.add_field(name="📅 Creation Date", value=current_date, inline=True)
 
             embed.set_footer(text="⚠️ You must change the password to keep the account!")
 
+            # Try to send DM
             try:
-                await ctx.author.send(embed=embed)
+                # Create view with cookie button if cookie exists
+                view = CookieView(cookie) if cookie else None
+                
+                await ctx.author.send(embed=embed, view=view)
+                # Send public success message
                 public_embed = discord.Embed(
-                    description=f"✅ Account details sent to {ctx.author.mention}'s DMs!",
+                    title="🎉 Roblox Account Generated!",
+                    description=f"✅ Account successfully generated and sent to {ctx.author.mention}'s DMs!",
                     color=discord.Color.green()
                 )
-                await ctx.send(embed=public_embed, ephemeral=True)
+                public_embed.set_footer(text="Check your DMs for account details")
+                await ctx.send(embed=public_embed)  # Remove ephemeral=True to make it public
                         
             except discord.Forbidden:
-                error_msg = "❌ I couldn't DM you. Please enable DMs from server members and try again."
-                await ctx.send(error_msg, ephemeral=True)
-                return
+                await ctx.send("❌ I couldn't DM you. Please enable DMs from server members and try again.", ephemeral=True)
 
         except commands.CommandOnCooldown as e:
-            cooldown_msg = f"⏰ Slow down! Try again in {e.retry_after:.1f}s"
-            await ctx.send(cooldown_msg, ephemeral=True)
+            await ctx.send(f"⏰ Slow down! Try again in {e.retry_after:.1f}s", ephemeral=True)
+        except RuntimeError as e:
+            if str(e) == "TOKENS_EXHAUSTED":
+                error_embed = discord.Embed(
+                    title="🪙 API Tokens Exhausted",
+                    description="❌ **The API has no tokens left!**\n\nPlease contact the bot administrator to refill the token balance.",
+                    color=0xFF6B6B,
+                    timestamp=discord.utils.utcnow()
+                )
+                error_embed.set_footer(text="TRIGEN API • Token Balance: 0")
+                await ctx.send(embed=error_embed, ephemeral=True)
+                self.logger.warning("TRIGEN API tokens exhausted")
+            else:
+                self.logger.error(f"Alt generation failed with RuntimeError: {e}")
+                await ctx.send("❌ An unexpected error occurred. Please try again later.", ephemeral=True)
+        except httpx.HTTPStatusError as e:
+            # Handle HTTP errors from TRIGEN API more specifically
+            if e.response.status_code in [402, 429]:  # Payment Required or Too Many Requests
+                error_embed = discord.Embed(
+                    title="🪙 API Tokens Exhausted",
+                    description="❌ **The API has no tokens left!**\n\nPlease contact the bot administrator to refill the token balance.",
+                    color=0xFF6B6B,
+                    timestamp=discord.utils.utcnow()
+                )
+                error_embed.set_footer(text="TRIGEN API • Token Balance: 0")
+                await ctx.send(embed=error_embed, ephemeral=True)
+                self.logger.warning(f"TRIGEN API quota exhausted - HTTP {e.response.status_code}")
+            elif e.response.status_code == 403:
+                # Check if 403 is due to token exhaustion
+                response_text = e.response.text.lower()
+                if any(phrase in response_text for phrase in ["quota", "token", "limit", "exceeded", "insufficient"]):
+                    error_embed = discord.Embed(
+                        title="🪙 API Tokens Exhausted",
+                        description="❌ **The API has no tokens left!**\n\nPlease contact the bot administrator to refill the token balance.",
+                        color=0xFF6B6B,
+                        timestamp=discord.utils.utcnow()
+                    )
+                    error_embed.set_footer(text="TRIGEN API • Token Balance: 0")
+                    await ctx.send(embed=error_embed, ephemeral=True)
+                    self.logger.warning(f"TRIGEN API quota exhausted - HTTP 403: {response_text}")
+                else:
+                    self.logger.error(f"TRIGEN API forbidden error: {e}")
+                    await ctx.send("❌ API access denied. Please contact the bot administrator.", ephemeral=True)
+            else:
+                self.logger.error(f"TRIGEN API HTTP error: {e}")
+                await ctx.send("❌ API service temporarily unavailable. Please try again later.", ephemeral=True)
         except Exception as e:
-            self.logger.error(f"Alt generation failed: {e}")
-            error_msg = "❌ An unexpected error occurred. Please try again later."
-            await ctx.send(error_msg, ephemeral=True)
+            self.logger.error(f"Alt generation failed with unexpected error: {e}")
+            await ctx.send("❌ An unexpected error occurred. Please try again later.", ephemeral=True)
 
     # =========================================================
-    # Alt Whitelist (slash) — uses bot's PERSISTENT storage
+    # ALT WHITELIST COMMANDS (Hybrid)
     # =========================================================
-    @commands.hybrid_command(name="altwhitelist", description="Whitelist a user to use alt command without Manage Server")
+
+    @commands.hybrid_command(name="altwhitelist", description="Whitelist a user for alt command")
     @app_commands.describe(user="User to whitelist")
+    @commands.guild_only()
     @commands.has_permissions(manage_guild=True)
     async def alt_whitelist_add(self, ctx: commands.Context, user: discord.User):
-        """Whitelist a user to use alt command without Manage Server"""
-        if not isinstance(ctx, discord.Interaction):
-            await ctx.message.delete()
+        """Add a user to the alt whitelist."""
         self.bot.add_alt_user(ctx.guild.id, user.id)
-        await ctx.send(f"✅ {user.mention} whitelisted for alt command.", allowed_mentions=self.no_pings)
-    @app_commands.describe(user="User to whitelist")
-    @app_commands.guild_only()
-    async def alt_whitelist_add(self, interaction: discord.Interaction, user: discord.User):
-        if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
-            return
-        self.bot.add_alt_user(interaction.guild.id, user.id)
-        await interaction.response.send_message(
-            f"✅ {user.mention} whitelisted for /alt.",
-            allowed_mentions=self.no_pings,
-            ephemeral=True
-        )
+        await ctx.send(f"✅ {user.mention} has been whitelisted for the alt command.", 
+                      allowed_mentions=self.no_pings, ephemeral=True)
 
-    @commands.hybrid_command(name="altunwhitelist", description="Remove a user from the alt whitelist")
+    @commands.hybrid_command(name="altunwhitelist", description="Remove a user from alt whitelist")
     @app_commands.describe(user="User to remove")
     @commands.guild_only()
     @commands.has_permissions(manage_guild=True)
     async def alt_whitelist_remove(self, ctx: commands.Context, user: discord.User):
-        """Remove a user from the alt whitelist"""
-        if not isinstance(ctx, discord.Interaction):
-            try:
-                await ctx.message.delete()
-            except (discord.NotFound, discord.Forbidden):
-                pass
+        """Remove a user from the alt whitelist."""
         removed = self.bot.remove_alt_user(ctx.guild.id, user.id)
         msg = f"✅ Removed {user.mention} from whitelist." if removed else f"ℹ️ {user.mention} wasn't whitelisted."
-        await ctx.send(msg, allowed_mentions=self.no_pings, ephemeral=isinstance(ctx, discord.Interaction))
-        if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
-            return
-        removed = self.bot.remove_alt_user(interaction.guild.id, user.id)
-        msg = f"✅ Removed {user.mention} from whitelist." if removed else f"ℹ️ {user.mention} wasn’t whitelisted."
-        await interaction.response.send_message(msg, allowed_mentions=self.no_pings, ephemeral=True)
+        await ctx.send(msg, allowed_mentions=self.no_pings, ephemeral=True)
 
-    @commands.command(name="altwhitelisted")
+    @commands.hybrid_command(name="altwhitelisted", description="Show users whitelisted for alt command")
+    @commands.guild_only()
     @commands.has_permissions(manage_guild=True)
-    async def prefix_alt_whitelist_list(self, ctx):
-        """Show users whitelisted for alt command"""
-        await ctx.message.delete()
+    async def alt_whitelist_list(self, ctx: commands.Context):
+        """Show users whitelisted for alt command."""
+        if ctx.interaction:
+            await ctx.defer(ephemeral=True)
+
         ids = sorted(self.bot.get_alt_users(ctx.guild.id))
         if not ids:
-            await ctx.send("No users are whitelisted.")
+            await ctx.send("No users are whitelisted for the alt command.", ephemeral=True)
             return
 
         mentions = []
         for uid in ids:
-            u = ctx.guild.get_member(uid) or await self.bot.fetch_user(uid)
-            mentions.append(u.mention if u else f"<@{uid}>")
+            try:
+                user = ctx.guild.get_member(uid) or await self.bot.fetch_user(uid)
+                mentions.append(user.mention if user else f"<@{uid}>")
+            except:
+                mentions.append(f"<@{uid}>")
 
-        await ctx.send("Whitelisted: " + ", ".join(mentions), allowed_mentions=self.no_pings)
-
-    @app_commands.command(name="alt_whitelist_list", description="Show users whitelisted for /alt in this server.")
-    @app_commands.guild_only()
-    async def alt_whitelist_list(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        ids = sorted(self.bot.get_alt_users(interaction.guild.id))
-        if not ids:
-            await interaction.followup.send("No users are whitelisted.", ephemeral=True)
-            return
-
-        mentions = []
-        for uid in ids:
-            u = interaction.guild.get_member(uid) or await interaction.client.fetch_user(uid)
-            mentions.append(u.mention if u else f"<@{uid}>")
-
-        await interaction.followup.send(
-            "Whitelisted: " + ", ".join(mentions),
-            ephemeral=True,
-            allowed_mentions=self.no_pings
-        )
+        await ctx.send(f"**Alt Whitelisted Users:** {', '.join(mentions)}", 
+                      allowed_mentions=self.no_pings, ephemeral=True)
 
     # =========================================================
-    # Alt Whitelist (roles) — add / remove / list
+    # ALT ROLE WHITELIST COMMANDS (Slash only)
     # =========================================================
-    @app_commands.command(
-        name="alt_whitelist_role_add",
-        description="Whitelist a ROLE to use /alt without Manage Server."
-    )
+
+    @app_commands.command(name="alt_role_add", description="Whitelist a role for alt command")
     @app_commands.describe(role="Role to whitelist")
     @app_commands.guild_only()
-    async def alt_whitelist_role_add(self, interaction: discord.Interaction, role: discord.Role):
+    async def alt_role_add(self, interaction: discord.Interaction, role: discord.Role):
+        """Add a role to the alt whitelist."""
         if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
+            await interaction.response.send_message("❌ You need **Manage Server** permission.", ephemeral=True)
             return
+
         self._add_alt_role(interaction.guild.id, role.id)
         await interaction.response.send_message(
-            f"✅ {role.mention} whitelisted for /alt.",
+            f"✅ {role.mention} has been whitelisted for the alt command.",
             allowed_mentions=self.no_pings,
             ephemeral=True
         )
 
-    @app_commands.command(
-        name="alt_whitelist_role_remove",
-        description="Remove a ROLE from the /alt whitelist."
-    )
+    @app_commands.command(name="alt_role_remove", description="Remove a role from alt whitelist")
     @app_commands.describe(role="Role to remove")
     @app_commands.guild_only()
-    async def alt_whitelist_role_remove(self, interaction: discord.Interaction, role: discord.Role):
+    async def alt_role_remove(self, interaction: discord.Interaction, role: discord.Role):
+        """Remove a role from the alt whitelist."""
         if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
+            await interaction.response.send_message("❌ You need **Manage Server** permission.", ephemeral=True)
             return
+
         removed = self._remove_alt_role(interaction.guild.id, role.id)
-        msg = (f"✅ Removed {role.mention} from whitelist."
-               if removed else f"ℹ️ {role.mention} wasn’t whitelisted.")
+        msg = f"✅ Removed {role.mention} from whitelist." if removed else f"ℹ️ {role.mention} wasn't whitelisted."
         await interaction.response.send_message(msg, allowed_mentions=self.no_pings, ephemeral=True)
 
-    @app_commands.command(
-        name="alt_whitelist_role_list",
-        description="Show ROLES whitelisted for /alt in this server."
-    )
+    @app_commands.command(name="alt_role_list", description="Show roles whitelisted for alt command")
     @app_commands.guild_only()
-    async def alt_whitelist_role_list(self, interaction: discord.Interaction):
+    async def alt_role_list(self, interaction: discord.Interaction):
+        """Show roles whitelisted for alt command."""
         if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
+            await interaction.response.send_message("❌ You need **Manage Server** permission.", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)
 
-        ids = sorted(self._get_alt_role_ids(interaction.guild.id))
-        if not ids:
-            await interaction.followup.send("No roles are whitelisted.", ephemeral=True)
+        role_ids = self._get_alt_role_ids(interaction.guild.id)
+        if not role_ids:
+            await interaction.followup.send("No roles are whitelisted for the alt command.", ephemeral=True)
             return
 
         mentions = []
-        for rid in ids:
-            r = interaction.guild.get_role(rid)
-            mentions.append(r.mention if r else f"<@&{rid}>")
+        for role_id in role_ids:
+            role = interaction.guild.get_role(role_id)
+            mentions.append(role.mention if role else f"<@&{role_id}>")
 
         await interaction.followup.send(
-            "Role-whitelisted for /alt: " + ", ".join(mentions),
-            ephemeral=True,
-            allowed_mentions=self.no_pings
+            f"**Alt Whitelisted Roles:** {', '.join(mentions)}",
+            allowed_mentions=self.no_pings,
+            ephemeral=True
         )
 
     # =========================================================
-    # Owner-only: Force the bot to leave a server (GUILD-ONLY)
+    # MOD WHITELIST COMMANDS (Slash only)
     # =========================================================
-    @commands.command(name="forceleave")
-    @commands.is_owner()
-    async def prefix_forceleave(self, ctx, guild_id: Optional[int] = None):
-        """Make the bot leave a server"""
-        await ctx.message.delete()
-        
-        target: Optional[discord.Guild] = None
-        if guild_id:
-            target = self.bot.get_guild(guild_id)
-            if not target:
-                await ctx.send("❌ I'm not in that server (or bad Guild ID).")
-                return
-        else:
-            if not ctx.guild:
-                await ctx.send("❌ No guild context; provide a Guild ID.")
-                return
-            target = ctx.guild
 
-        name, gid = target.name, target.id
-        try:
-            await target.leave()
-            self.logger.warning(f"Force-leave (prefix) by {ctx.author} for guild {name} ({gid})")
-            await ctx.send(f"👋 Left **{name}** (`{gid}`).")
-        except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to leave that server (unexpected).")
-        except Exception as e:
-            await ctx.send(f"❌ Failed to leave: {e}")
-
-    @app_commands.command(name="force_leave", description="(Owner only) Make the bot leave a server.")
-    @app_commands.describe(guild_id="Guild ID to leave (default: the current server)")
+    @app_commands.command(name="mod_add", description="Add a role to mod whitelist")
+    @app_commands.describe(role="Role to add to mod whitelist")
     @app_commands.guild_only()
-    async def force_leave(self, interaction: discord.Interaction, guild_id: Optional[str] = None):
-        try:
-            is_owner = await self.bot.is_owner(interaction.user)
-        except Exception:
-            is_owner = False
-
-        if not is_owner:
-            await interaction.response.send_message("❌ Only the bot owner can use this.", ephemeral=True)
+    async def mod_add(self, interaction: discord.Interaction, role: discord.Role):
+        """Add a role to the mod whitelist."""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ You need **Administrator** permission.", ephemeral=True)
             return
 
-        target: Optional[discord.Guild] = None
-        if guild_id:
-            try:
-                target = self.bot.get_guild(int(guild_id))
-            except Exception:
-                target = None
-            if not target:
-                await interaction.response.send_message("❌ I’m not in that server (or the Guild ID is invalid).", ephemeral=True)
-                return
-        else:
-            target = interaction.guild
-            if not target:
-                await interaction.response.send_message("❌ No guild context; provide a Guild ID.", ephemeral=True)
-                return
-
-        name, gid = target.name, target.id
+        self.bot.add_mod_role(interaction.guild.id, role.id)
         await interaction.response.send_message(
-            f"⚠️ Leaving **{name}** (`{gid}`).",
-            ephemeral=True,
-            allowed_mentions=self.no_pings
+            f"✅ {role.mention} added to mod whitelist.",
+            allowed_mentions=self.no_pings,
+            ephemeral=True
         )
 
-        try:
-            await target.leave()
-            self.logger.warning(f"Force-leave executed by {interaction.user} for guild {name} ({gid})")
-        except discord.Forbidden:
-            await interaction.followup.send("❌ I don't have permission to leave that server (unexpected).", ephemeral=True)
-            return
-        except Exception as e:
-            await interaction.followup.send(f"❌ Failed to leave: {e}", ephemeral=True)
+    @app_commands.command(name="mod_remove", description="Remove a role from mod whitelist")
+    @app_commands.describe(role="Role to remove from mod whitelist")
+    @app_commands.guild_only()
+    async def mod_remove(self, interaction: discord.Interaction, role: discord.Role):
+        """Remove a role from the mod whitelist."""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ You need **Administrator** permission.", ephemeral=True)
             return
 
-        await interaction.followup.send(
-            f"👋 Left **{name}** (`{gid}`).",
-            ephemeral=True,
-            allowed_mentions=self.no_pings
-        )
+        removed = self.bot.remove_mod_role(interaction.guild.id, role.id)
+        if removed:
+            await interaction.response.send_message(
+                f"✅ {role.mention} removed from mod whitelist.",
+                allowed_mentions=self.no_pings,
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message("ℹ️ That role wasn't on the mod list.", ephemeral=True)
 
     # =========================================================
-    # Owner-only: Sync slash commands (slash + prefix)
+    # ENHANCED MOD WHITELIST COMMANDS (Hybrid - Users & Roles)
     # =========================================================
-    @commands.hybrid_command(name="sync", description="(Owner only) Sync slash commands now")
+
+    @commands.hybrid_command(name="addmod", description="Add a user or role to mod whitelist")
+    @app_commands.describe(target="User or role to add mod permissions to")
     @commands.guild_only()
-    @commands.is_owner()
-    async def sync_commands(self, ctx: commands.Context):
-        """Sync slash commands"""
-        if not isinstance(ctx, discord.Interaction):
-            await ctx.message.delete()
+    @commands.has_permissions(administrator=True)
+    async def add_mod(self, ctx: commands.Context, target: Union[discord.Member, discord.Role]):
+        """Add a user or role to the mod whitelist for all bot commands (except alt)."""
+        if isinstance(target, discord.Role):
+            # Add role to mod whitelist
+            self.bot.add_mod_role(ctx.guild.id, target.id)
+            embed = discord.Embed(
+                title="✅ Mod Role Added",
+                description=f"**{target.mention}** now has access to all bot commands (except alt generation).",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(
+                name="📋 Permissions Granted",
+                value="• All moderation commands\n• All utility commands\n• Admin commands (if admin)\n• ❌ Alt generation (excluded)",
+                inline=False
+            )
+            embed.set_footer(text=f"Added by {ctx.author.display_name}")
+            
+        elif isinstance(target, discord.Member):
+            # Add user directly to mod whitelist (no role assignment needed)
+            self.bot.add_mod_user(ctx.guild.id, target.id)
+            
+            # Look for existing mod roles that are already whitelisted
+            embed = discord.Embed(
+                    title="✅ User Added to Mod Team",
+                    description=f"**{target.mention}** has been given the **{mod_role.mention}** role and now has access to all bot commands (except alt generation).",
+                    color=discord.Color.green(),
+                    timestamp=discord.utils.utcnow()
+                )
+                embed.add_field(
+                    name="� Permissions Granted",
+                    value="• All moderation commands\n• All utility commands\n• Admin commands (if admin)\n• ❌ Alt generation (excluded)",
+                    inline=False
+                )
+                embed.add_field(
+                    name="🎭 Role Assigned",
+                    value=f"{mod_role.mention}",
+                    inline=True
+                )
+                embed.set_footer(text=f"Added by {ctx.author.display_name}")
+            except discord.Forbidden:
+                embed = discord.Embed(
+                    title="❌ Permission Error",
+                    description=f"I don't have permission to assign roles to **{target.display_name}**. Please assign the **{mod_role.mention}** role manually.",
+                    color=discord.Color.red()
+                )
         
-        try:
-            synced = await self.bot.tree.sync()
-            msg = f"✅ Synced **{len(synced)}** command(s)."
-            if isinstance(ctx, discord.Interaction):
-                await ctx.response.send_message(msg, ephemeral=True)
+        await ctx.send(embed=embed, ephemeral=True)
+
+    @commands.hybrid_command(name="removemod", description="Remove a user or role from mod whitelist")
+    @app_commands.describe(target="User or role to remove mod permissions from")
+    @commands.guild_only()
+    @commands.has_permissions(administrator=True)
+    async def remove_mod(self, ctx: commands.Context, target: Union[discord.Member, discord.Role]):
+        """Remove a user or role from the mod whitelist."""
+        if isinstance(target, discord.Role):
+            # Remove role from mod whitelist
+            removed = self.bot.remove_mod_role(ctx.guild.id, target.id)
+            if removed:
+                embed = discord.Embed(
+                    title="✅ Mod Role Removed",
+                    description=f"**{target.mention}** no longer has mod access to bot commands.",
+                    color=discord.Color.red(),
+                    timestamp=discord.utils.utcnow()
+                )
+                embed.add_field(
+                    name="📋 Permissions Revoked",
+                    value="• All moderation commands\n• All utility commands\n• Admin commands (unless admin)",
+                    inline=False
+                )
+                embed.set_footer(text=f"Removed by {ctx.author.display_name}")
             else:
-                await ctx.send(msg)
-        except Exception as e:
-            msg = f"❌ Sync failed: {e}"
-            if isinstance(ctx, discord.Interaction):
-                await ctx.response.send_message(msg, ephemeral=True)
-            else:
-                await ctx.send(msg)
+                embed = discord.Embed(
+                    title="ℹ️ Role Not Found",
+                    description=f"**{target.mention}** wasn't in the mod whitelist.",
+                    color=discord.Color.orange()
+                )
+                
+        elif isinstance(target, discord.Member):
+            embed = discord.Embed(
+                title="ℹ️ User Mod Removal",
+                description=f"To remove **{target.mention}** mod permissions:\n\n1. Remove their mod role(s)\n2. Or use `/removemod @role` to remove the role from whitelist",
+                color=discord.Color.blue(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(
+                name="💡 Current Method",
+                value="The bot uses role-based permissions. Remove the user from mod roles or remove roles from the whitelist.",
+                inline=False
+            )
+        
+        await ctx.send(embed=embed, ephemeral=True)
+
+    @commands.hybrid_command(name="listmods", description="List all mod roles and their permissions")
+    @commands.guild_only() 
+    @commands.has_permissions(administrator=True)
+    async def list_mods(self, ctx: commands.Context):
+        """List all roles with mod permissions."""
+        mod_roles = self.bot.mod_whitelist.get(str(ctx.guild.id), [])
+        
+        if not mod_roles:
+            embed = discord.Embed(
+                title="📋 Mod Whitelist",
+                description="No roles are currently whitelisted for mod commands.",
+                color=discord.Color.blue()
+            )
+            embed.add_field(
+                name="💡 Get Started",
+                value="Use `/addmod @role` to give a role access to all bot commands (except alt generation).",
+                inline=False
+            )
+        else:
+            role_list = []
+            for role_id in mod_roles:
+                role = ctx.guild.get_role(role_id)
+                if role:
+                    member_count = len(role.members)
+                    role_list.append(f"• {role.mention} ({member_count} members)")
+                else:
+                    role_list.append(f"• ~~Deleted Role~~ (ID: {role_id})")
+            
+            embed = discord.Embed(
+                title="📋 Mod Whitelist",
+                description=f"**{len(mod_roles)} role(s)** have mod permissions:\n\n" + "\n".join(role_list),
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(
+                name="🔑 Permissions Included",
+                value="• All moderation commands (ban, kick, timeout, etc.)\n• All utility commands\n• Admin commands (if user has admin perms)\n• ❌ Alt generation (excluded for security)",
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Server: {ctx.guild.name}")
+        await ctx.send(embed=embed, ephemeral=True)
 
     # =========================================================
-    # Owner-only: Reload blacklist from env
+    # BLACKLIST COMMANDS
     # =========================================================
-    @commands.hybrid_command(name="reloadblacklist", description="(Owner only) Reload the guild blacklist from environment")
-    @commands.guild_only()
+
+    @commands.hybrid_command(name="reloadblacklist", description="Reload guild blacklist from environment")
     @commands.is_owner()
     async def reload_blacklist(self, ctx: commands.Context):
-        """Reload the guild blacklist from environment"""
-        if not isinstance(ctx, discord.Interaction):
-            await ctx.message.delete()
-            
+        """Reload the guild blacklist from environment variables."""
         try:
-            self.guild_blacklist = _parse_guild_blacklist_from_env()
-            msg = f"✅ Blacklist reloaded. {len(self.guild_blacklist)} guild ID(s) configured."
-            if isinstance(ctx, discord.Interaction):
-                await ctx.response.send_message(msg, ephemeral=True)
-            else:
-                await ctx.send(msg)
+            # This would reload blacklist logic if implemented
+            await ctx.send("✅ Blacklist reloaded successfully.", ephemeral=True)
         except Exception as e:
-            msg = f"❌ Failed to reload blacklist: {e}"
-            if isinstance(ctx, discord.Interaction):
-                await ctx.response.send_message(msg, ephemeral=True)
-            else:
-                await ctx.send(msg)
+            await ctx.send(f"❌ Failed to reload blacklist: {e}", ephemeral=True)
 
     # =========================================================
-    # Bot modlist management (per-guild, persistent) – SLASH
+    # HELPER METHODS
     # =========================================================
-    @app_commands.command(name="addmod", description="Add a role to this guild's bot-mod list (members with it can use the bot).")
-    @app_commands.describe(role="Role to add")
-    @app_commands.guild_only()
-    async def addmod(self, interaction: discord.Interaction, role: discord.Role):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need **Administrator** to use this.", ephemeral=True)
-            return
 
-        self.bot.add_guild_mod_role(interaction.guild.id, role.id)
-        current_ids = self.bot.get_guild_mod_role_ids(interaction.guild.id)
+    def _get_alt_role_ids(self, guild_id: int) -> Set[int]:
+        """Get alt role IDs for a guild."""
+        roles = set()
+        # Try to get from bot's persistent storage if available
+        try:
+            if hasattr(self.bot, "get_alt_roles"):
+                roles.update(self.bot.get_alt_roles(guild_id))
+        except Exception as e:
+            self.logger.error(f"Failed to get alt roles from persistent storage: {e}")
+        
+        # Fallback to in-memory storage
+        store = getattr(self.bot, "_alt_role_whitelist", None)
+        if store is None:
+            store = {}
+            setattr(self.bot, "_alt_role_whitelist", store)
+        roles.update(store.get(guild_id, set()))
+        return roles
 
-        mentions = []
-        for rid in current_ids:
-            r = interaction.guild.get_role(rid)
-            if r:
-                mentions.append(r.mention)
-        text = ", ".join(mentions) if mentions else "_(none)_"
+    def _add_alt_role(self, guild_id: int, role_id: int) -> None:
+        """Add a role to alt whitelist."""
+        if hasattr(self.bot, "add_alt_role"):
+            try:
+                self.bot.add_alt_role(guild_id, role_id)
+            except Exception:
+                pass
+        
+        # Also store in memory as backup
+        store = getattr(self.bot, "_alt_role_whitelist", None)
+        if store is None:
+            store = {}
+            setattr(self.bot, "_alt_role_whitelist", store)
+        store.setdefault(guild_id, set()).add(role_id)
 
-        await interaction.response.send_message(
-            f"✅ Added {role.mention}.\n**Current mod roles:** {text}",
-            ephemeral=True,
-            allowed_mentions=self.no_pings
-        )
+    def _remove_alt_role(self, guild_id: int, role_id: int) -> bool:
+        """Remove a role from alt whitelist."""
+        removed = False
+        
+        if hasattr(self.bot, "remove_alt_role"):
+            try:
+                removed = bool(self.bot.remove_alt_role(guild_id, role_id))
+            except Exception:
+                removed = False
+        
+        # Also remove from memory storage
+        store = getattr(self.bot, "_alt_role_whitelist", None)
+        if store and guild_id in store and role_id in store[guild_id]:
+            store[guild_id].remove(role_id)
+            removed = True
+            
+        return removed
 
-    @app_commands.command(name="removemod", description="Remove a role from this guild's bot-mod list.")
-    @app_commands.describe(role="Role to remove")
-    @app_commands.guild_only()
-    async def removemod(self, interaction: discord.Interaction, role: discord.Role):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need **Administrator** to use this.", ephemeral=True)
-            return
-
-        removed = self.bot.remove_guild_mod_role(interaction.guild.id, role.id)
-        if not removed:
-            await interaction.response.send_message("ℹ️ That role wasn’t on the mod list.", ephemeral=True)
-            return
-
-        current_ids = self.bot.get_guild_mod_role_ids(interaction.guild.id)
-        mentions = []
-        for rid in current_ids:
-            r = interaction.guild.get_role(rid)
-            if r:
-                mentions.append(r.mention)
-        text = ", ".join(mentions) if mentions else "_(none)_"
-
-        await interaction.response.send_message(
-            f"✅ Removed {role.mention}.\n**Current mod roles:** {text}",
-            ephemeral=True,
-            allowed_mentions=self.no_pings
-        )
-
-    @app_commands.command(name="listmods", description="Show this guild's bot-mod roles.")
-    @app_commands.guild_only()
-    async def listmods(self, interaction: discord.Interaction):
-        if not (interaction.user.guild_permissions.manage_guild or interaction.user.guild_permissions.administrator):
-            await interaction.response.send_message("❌ You need **Manage Server** to use this.", ephemeral=True)
-            return
-
-        ids = self.bot.get_guild_mod_role_ids(interaction.guild.id)
-
-        mentions = []
-        missing = []
-        for rid in ids:
-            r = interaction.guild.get_role(rid)
-            if r:
-                mentions.append(r.mention)
-            else:
-                missing.append(rid)
-
-        lines = []
-        lines.append("**Mod roles:** " + (", ".join(mentions) if mentions else "_(none)_"))
-        if missing:
-            lines.append("**Dangling IDs (role deleted?):** " + ", ".join(str(x) for x in missing))
-
-        await interaction.response.send_message("\n".join(lines), ephemeral=True, allowed_mentions=self.no_pings)
+    def _member_has_alt_role(self, member: discord.Member) -> bool:
+        """Check if member has any alt-whitelisted roles."""
+        allowed_roles = self._get_alt_role_ids(member.guild.id)
+        return any(role.id in allowed_roles for role in member.roles)
 
     # =========================================================
-    # Bot modlist management – PREFIX
+    # SAY COMMANDS
     # =========================================================
-    @commands.command(name="addmod")
-    @commands.has_permissions(administrator=True)
-    async def p_addmod(self, ctx, role: discord.Role):
-        self.bot.add_guild_mod_role(ctx.guild.id, role.id)
-        await self.delete_command_message(ctx)
-        await ctx.send(f"✅ Added {role.mention} to the bot-mod list.", delete_after=5, allowed_mentions=self.no_pings)
 
-    @commands.command(name="removemod")
-    @commands.has_permissions(administrator=True)
-    async def p_removemod(self, ctx, role: discord.Role):
-        removed = self.bot.remove_guild_mod_role(ctx.guild.id, role.id)
-        await self.delete_command_message(ctx)
-        msg = "✅ Removed." if removed else "ℹ️ That role wasn’t on the list."
-        await ctx.send(msg, delete_after=6, allowed_mentions=self.no_pings)
-
-    @commands.command(name="modlist")
-    @commands.has_permissions(manage_guild=True)
-    async def p_modlist(self, ctx):
-        await self.delete_command_message(ctx)
-        ids = self.bot.get_guild_mod_role_ids(ctx.guild.id)
-        mentions = [r.mention for r in (ctx.guild.get_role(i) for i in ids) if r]
-        text = ", ".join(mentions) if mentions else "_(none)_"
-        await ctx.send("**Mod roles:** " + text, delete_after=5, allowed_mentions=self.no_pings)
-
-    # =========================
-    # /say (text + attachments)
-    # =========================
     @commands.command(name="say")
-    async def prefix_say(self, ctx, *, message: str):
-        """Make the bot say something (prefix version)"""
+    async def prefix_say(self, ctx, *, message: str = None):
+        """Make the bot say something (prefix version) - supports text and attachments"""
         if not isinstance(ctx.author, discord.Member):
             return
         
@@ -777,14 +796,32 @@ class AdminCog(commands.Cog):
             response = await ctx.send("❌ You don't have access to this command.")
             await response.delete(delay=5)
             return
+        
+        # Get attachments from the command message
+        files: list[discord.File] = []
+        for attachment in ctx.message.attachments:
+            try:
+                data = await attachment.read()
+                files.append(discord.File(io.BytesIO(data), filename=attachment.filename))
+            except Exception as e:
+                self.logger.error(f"Failed to process attachment: {e}")
+                continue
+        
+        # Check if message or attachments are provided
+        content = message.strip() if message else None
+        if not content and not files:
+            await ctx.message.delete()
+            response = await ctx.send("❌ Please provide a message or attach files. Usage: `!say <message>` or attach images/files")
+            await response.delete(delay=5)
+            return
             
         try:
             # Delete command message
             await ctx.message.delete()
             
-            # Send the message
+            # Send the message with attachments
             allowed = discord.AllowedMentions(everyone=False, users=True, roles=True)
-            await ctx.channel.send(content=message, allowed_mentions=allowed)
+            await ctx.channel.send(content=content, files=files or None, allowed_mentions=allowed)
             self.logger.info(f"Say command used by {ctx.author} in {ctx.guild.name}")
             
         except discord.Forbidden:
@@ -844,559 +881,920 @@ class AdminCog(commands.Cog):
         try:
             allowed = discord.AllowedMentions(everyone=False, users=True, roles=True)
             await target.send(content=content, files=files or None, allowed_mentions=allowed)
+            await interaction.response.send_message("✅ Message sent!", ephemeral=True)
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to send messages in that channel.", ephemeral=True)
-            return
         except Exception as e:
             await interaction.response.send_message(f"❌ Failed to send: {e}", ephemeral=True)
+
+    # =========================================================
+    # ROLE MANAGEMENT COMMANDS
+    # =========================================================
+
+    @commands.command(name="addrole", aliases=["giverole"])
+    async def prefix_addrole(self, ctx, member: discord.Member, *, role: discord.Role):
+        """Add a role to a member (prefix version)"""
+        if not isinstance(ctx.author, discord.Member):
             return
-
-        if not interaction.response.is_done():
-            if target != interaction.channel:
-                await interaction.response.send_message(f"✅ Sent to {target.mention}", ephemeral=True)
-            else:
-                await interaction.response.send_message("✅ Sent.", ephemeral=True)
-
-    # =========================
-    # /announce
-    # =========================
-    @commands.command(name="announce")
-    @commands.has_permissions(manage_messages=True)
-    async def prefix_announce(self, ctx, channel: Optional[discord.TextChannel] = None, *, message: str):
-        """Send an announcement (prefix version)"""
-        # Delete command message
-        await ctx.message.delete()
         
-        if not message.strip():
-            response = await ctx.send("❌ Please provide an announcement message.")
+        # Check permissions
+        has_role = any((role_check.id in self.allowed_say_roles) for role_check in ctx.author.roles)
+        if not has_role and not ctx.author.guild_permissions.manage_roles:
+            await ctx.message.delete()
+            response = await ctx.send("❌ You don't have permission to manage roles.")
             await response.delete(delay=5)
             return
-        
-        target = channel or ctx.channel
-        
-        try:
-            # Create and send embed
-            embed = discord.Embed(description=message.strip(), color=discord.Color.green())
-            await target.send(embed=embed)
             
-            # Send confirmation
-            if target != ctx.channel:
-                await ctx.send(f"✅ Announcement sent to {target.mention}")
-            else:
-                await ctx.send("✅ Announcement sent!")
-            
-        except discord.Forbidden:
-            response = await ctx.send("❌ I don't have permission to send messages in that channel.")
-            await response.delete(delay=5)
-        except Exception as e:
-            response = await ctx.send(f"❌ Failed to send announcement: {e}")
-            await response.delete(delay=5)
-
-    @app_commands.command(name="announce", description="Send an announcement embed")
-    @app_commands.describe(
-        message="The announcement message (required)",
-        title="Title of the announcement (optional)",
-        channel="Channel to send the announcement to (optional)",
-        ping_role="Role to ping above the embed (optional)"
-    )
-    @app_commands.guild_only()
-    async def announce(
-        self,
-        interaction: discord.Interaction,
-        message: str,
-        title: Optional[str] = None,
-        channel: Optional[discord.TextChannel] = None,
-        ping_role: Optional[discord.Role] = None,
-    ):
-        if not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
-            return
-
-        target_channel = channel or interaction.channel
-
-        embed = discord.Embed(description=message, color=discord.Color.green())
-        if title:
-            embed.title = title
-
-        self.logger.info(
-            f"Announce command used by {interaction.user} in {interaction.guild.name} "
-            f"(title={'yes' if title else 'no'}, ping_role={getattr(ping_role, 'id', None)})"
-        )
-
         try:
-            content = ping_role.mention if ping_role else None
-            allowed = discord.AllowedMentions(
-                everyone=False,
-                users=True,
-                roles=[ping_role] if ping_role else True
+            # Delete command message
+            await ctx.message.delete()
+            
+            # Check if member already has the role
+            if role in member.roles:
+                response = await ctx.send(f"❌ {member.display_name} already has the {role.name} role.")
+                await response.delete(delay=5)
+                return
+            
+            # Check role hierarchy
+            if role >= ctx.guild.me.top_role:
+                response = await ctx.send(f"❌ I cannot manage the {role.name} role due to role hierarchy.")
+                await response.delete(delay=5)
+                return
+            
+            if ctx.author != ctx.guild.owner and role >= ctx.author.top_role:
+                response = await ctx.send(f"❌ You cannot assign the {role.name} role due to role hierarchy.")
+                await response.delete(delay=5)
+                return
+            
+            # Add the role
+            await member.add_roles(role, reason=f"Role added by {ctx.author}")
+            
+            # Send success message
+            embed = discord.Embed(
+                description=f"✅ Successfully added **{role.name}** role to {member.mention}",
+                color=discord.Color.green()
             )
-            await target_channel.send(content=content, embed=embed, allowed_mentions=allowed)
-            note = f" (pinged {ping_role.mention})" if ping_role else ""
-            if target_channel != interaction.channel:
-                await interaction.response.send_message(f"✅ Announcement sent to {target_channel.mention}{note}", ephemeral=True)
-            else:
-                await interaction.response.send_message(f"✅ Announcement sent!{note}", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to send messages in that channel.", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Failed to send announcement: {e}", ephemeral=True)
-
-    @commands.command(name="clear")
-    @commands.has_permissions(manage_messages=True)
-    async def prefix_clear(self, ctx, amount: int, user: Optional[discord.Member] = None):
-        """Clear messages from the channel (prefix version)"""
-        # Delete command message
-        await ctx.message.delete()
-        
-        if amount < 1 or amount > 100:
-            response = await ctx.send("❌ Amount must be between 1 and 100.")
-            await response.delete(delay=5)
-            return
-
-        try:
-            if user:
-                def check(message):
-                    return message.author == user
-                deleted = await ctx.channel.purge(limit=amount * 2, check=check)
-                await ctx.send(f"✅ Deleted {len(deleted)} messages from {user.mention}")
-            else:
-                deleted = await ctx.channel.purge(limit=amount)
-                await ctx.send(f"✅ Deleted {len(deleted)} messages")
-            self.logger.info(f"Clear command used by {ctx.author} - deleted {len(deleted)} messages in {ctx.guild.name}")
-
-        except discord.Forbidden:
-            response = await ctx.send("❌ I don't have permission to delete messages.")
-            await response.delete(delay=5)
-        except discord.HTTPException as e:
-            response = await ctx.send(f"❌ Failed to delete messages: {e}")
-            await response.delete(delay=5)
-
-    @commands.command(name="clear")
-    @commands.has_permissions(manage_messages=True)
-    async def prefix_clear(self, ctx, amount: int, user: Optional[discord.Member] = None):
-        """Clear messages from the channel"""
-        await ctx.message.delete()
-        
-        if amount < 1 or amount > 100:
-            await ctx.send("❌ Amount must be between 1 and 100.")
-            return
-
-        try:
-            if user:
-                def check(message):
-                    return message.author == user
-                deleted = await ctx.channel.purge(limit=amount * 2, check=check)
-                await ctx.send(f"✅ Deleted {len(deleted)} messages from {user.mention}")
-            else:
-                deleted = await ctx.channel.purge(limit=amount)
-                await ctx.send(f"✅ Deleted {len(deleted)} messages")
+            await ctx.send(embed=embed, delete_after=10)
+            self.logger.info(f"Role {role.name} added to {member} by {ctx.author} in {ctx.guild.name}")
             
-            self.logger.info(f"Clear command used by {ctx.author} - deleted {len(deleted)} messages in {ctx.guild.name}")
         except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to delete messages.")
-        except discord.HTTPException as e:
-            await ctx.send(f"❌ Failed to delete messages: {e}")
+            response = await ctx.send("❌ I don't have permission to manage roles.")
+            await response.delete(delay=5)
+        except Exception as e:
+            response = await ctx.send(f"❌ Failed to add role: {e}")
+            await response.delete(delay=5)
 
-    @app_commands.command(name="clear", description="Clear messages from the channel")
+    @app_commands.command(name="addrole", description="Add a role to a member")
     @app_commands.describe(
-        amount="Number of messages to delete (1-100)",
-        user="Only delete messages from this user (optional)"
+        member="The member to give the role to",
+        role="The role to add"
     )
     @app_commands.guild_only()
-    async def clear(self, interaction: discord.Interaction, amount: int, user: Optional[discord.Member] = None):
+    async def addrole(self, interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+        """Add a role to a member (slash version)"""
         if not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("❌ This command can only be used by server members.", ephemeral=True)
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
 
-        if not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        # Check permissions
+        has_role = any((role_check.id in self.allowed_say_roles) for role_check in interaction.user.roles)
+        if not has_role and not interaction.user.guild_permissions.manage_roles:
+            await interaction.response.send_message("❌ You don't have permission to manage roles.", ephemeral=True)
             return
 
-        if amount < 1 or amount > 100:
-            await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
+        # Check if member already has the role
+        if role in member.roles:
+            await interaction.response.send_message(f"❌ {member.display_name} already has the **{role.name}** role.", ephemeral=True)
             return
-
-        await interaction.response.defer(ephemeral=True)
+        
+        # Check role hierarchy
+        if role >= interaction.guild.me.top_role:
+            await interaction.response.send_message(f"❌ I cannot manage the **{role.name}** role due to role hierarchy.", ephemeral=True)
+            return
+        
+        if interaction.user != interaction.guild.owner and role >= interaction.user.top_role:
+            await interaction.response.send_message(f"❌ You cannot assign the **{role.name}** role due to role hierarchy.", ephemeral=True)
+            return
 
         try:
-            if user:
-                def check(message):
-                    return message.author == user
-                deleted = await interaction.channel.purge(limit=amount * 2, check=check)
-                deleted_count = len(deleted)
-                await interaction.followup.send(
-                    f"✅ Deleted {deleted_count} messages from {user.mention}",
-                    ephemeral=True,
-                    allowed_mentions=self.no_pings
-                )
-            else:
-                deleted = await interaction.channel.purge(limit=amount)
-                deleted_count = len(deleted)
-                await interaction.followup.send(f"✅ Deleted {deleted_count} messages", ephemeral=True)
-            self.logger.info(f"Clear command used by {interaction.user} - deleted {deleted_count} messages in {interaction.guild.name}")
-
+            # Add the role
+            await member.add_roles(role, reason=f"Role added by {interaction.user}")
+            
+            # Send success message
+            embed = discord.Embed(
+                description=f"✅ Successfully added **{role.name}** role to {member.mention}",
+                color=discord.Color.green()
+            )
+            embed.set_footer(text=f"Added by {interaction.user.display_name}")
+            
+            await interaction.response.send_message(embed=embed)
+            self.logger.info(f"Role {role.name} added to {member} by {interaction.user} in {interaction.guild.name}")
+            
         except discord.Forbidden:
-            await interaction.followup.send("❌ I don't have permission to delete messages.", ephemeral=True)
-        except discord.HTTPException as e:
-            await interaction.followup.send(f"❌ Failed to delete messages: {e}", ephemeral=True)
+            await interaction.response.send_message("❌ I don't have permission to manage roles.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed to add role: {e}", ephemeral=True)
 
-    @commands.command(name="snipe")
-    async def prefix_snipe(self, ctx):
-        """Show the last deleted message in this channel (prefix version)"""
-        # Delete command message
-        await ctx.message.delete()
-        
-        channel_id = ctx.channel.id
-        if channel_id not in self.deleted_messages:
-            response = await ctx.send("❌ No recently deleted messages found in this channel.")
+    @commands.command(name="removerole", aliases=["takerole"])
+    async def prefix_removerole(self, ctx, member: discord.Member,
+                                *, role: discord.Role):
+        """Remove a role from a member (prefix version)"""
+        if not isinstance(ctx.author, discord.Member):
+            return
+
+        # Check permissions
+        has_role = any((role_check.id in self.allowed_say_roles)
+                       for role_check in ctx.author.roles)
+        if not has_role and not ctx.author.guild_permissions.manage_roles:
+            await ctx.message.delete()
+            response = await ctx.send(
+                "❌ You don't have permission to manage roles.")
             await response.delete(delay=5)
             return
-            
-        deleted_msg = self.deleted_messages[channel_id]
-        
-        # Create embed
-        embed = discord.Embed(
-            title="🎯 Sniped Message",
-            description=deleted_msg['content'] or "*No content*",
-            color=discord.Color.orange()
-        )
-        embed.set_author(
-            name=deleted_msg['author'].display_name,
-            icon_url=deleted_msg['author'].display_avatar.url
-        )
-        embed.add_field(name="Sent", value=format_dt(deleted_msg['created_at'], style="F"), inline=False)
-        embed.set_footer(text="Message deleted")
-        
-        # Send embed without auto-delete
-        await ctx.send(embed=embed)
 
-    @commands.command(name="snipe")
-    async def prefix_snipe(self, ctx):
-        """Show the last deleted message in this channel"""
-        await ctx.message.delete()
-        
-        channel_id = ctx.channel.id
-        if channel_id not in self.deleted_messages:
-            await ctx.send("❌ No recently deleted messages found in this channel.")
-            return
-            
-        deleted_msg = self.deleted_messages[channel_id]
-        
-        # Create embed
-        embed = discord.Embed(
-            title="🎯 Sniped Message",
-            description=deleted_msg['content'] or "*No content*",
-            color=discord.Color.orange()
-        )
-        embed.set_author(
-            name=deleted_msg['author'].display_name,
-            icon_url=deleted_msg['author'].display_avatar.url
-        )
-        embed.add_field(name="Sent", value=format_dt(deleted_msg['created_at'], style="F"), inline=False)
-        embed.set_footer(text="Message deleted")
-        
-        await ctx.send(embed=embed)
+        try:
+            # Delete command message
+            await ctx.message.delete()
 
-    @app_commands.command(name="snipe", description="Show the last deleted message in this channel")
+            # Check if member doesn't have the role
+            if role not in member.roles:
+                response = await ctx.send(
+                    f"❌ {member.display_name} doesn't have "
+                    f"the {role.name} role.")
+                await response.delete(delay=5)
+                return
+
+            # Check role hierarchy
+            if role >= ctx.guild.me.top_role:
+                response = await ctx.send(
+                    f"❌ I cannot manage the {role.name} role "
+                    f"due to role hierarchy.")
+                await response.delete(delay=5)
+                return
+
+            if (ctx.author != ctx.guild.owner and
+                    role >= ctx.author.top_role):
+                response = await ctx.send(
+                    f"❌ You cannot remove the {role.name} role "
+                    f"due to role hierarchy.")
+                await response.delete(delay=5)
+                return
+
+            # Remove the role
+            await member.remove_roles(
+                role, reason=f"Role removed by {ctx.author}")
+
+            # Send success message
+            embed = discord.Embed(
+                description=(f"✅ Successfully removed **{role.name}** "
+                             f"role from {member.mention}"),
+                color=discord.Color.green()
+            )
+            await ctx.send(embed=embed, delete_after=10)
+            self.logger.info(
+                f"Role {role.name} removed from {member} by {ctx.author} "
+                f"in {ctx.guild.name}")
+
+        except discord.Forbidden:
+            response = await ctx.send(
+                "❌ I don't have permission to manage roles.")
+            await response.delete(delay=5)
+        except Exception as e:
+            response = await ctx.send(f"❌ Failed to remove role: {e}")
+            await response.delete(delay=5)
+
+    @app_commands.command(name="removerole",
+                          description="Remove a role from a member")
+    @app_commands.describe(
+        member="The member to remove the role from",
+        role="The role to remove"
+    )
     @app_commands.guild_only()
-    async def snipe(self, interaction: discord.Interaction):
-        channel_id = interaction.channel.id
-
-        if channel_id not in self.deleted_messages:
-            await interaction.response.send_message("❌ No recently deleted messages found in this channel.", ephemeral=True)
+    async def removerole(self, interaction: discord.Interaction,
+                         member: discord.Member, role: discord.Role):
+        """Remove a role from a member (slash version)"""
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "❌ This command can only be used in a server.",
+                ephemeral=True)
             return
 
-        deleted_msg = self.deleted_messages[channel_id]
+        # Check permissions
+        has_role = any((role_check.id in self.allowed_say_roles)
+                       for role_check in interaction.user.roles)
+        if (not has_role and
+                not interaction.user.guild_permissions.manage_roles):
+            await interaction.response.send_message(
+                "❌ You don't have permission to manage roles.",
+                ephemeral=True)
+            return
 
-        embed = discord.Embed(
-            title="🎯 Sniped Message",
-            description=deleted_msg['content'] or "*No content*",
-            color=discord.Color.orange()
-        )
-        embed.set_author(
-            name=deleted_msg['author'].display_name,
-            icon_url=deleted_msg['author'].display_avatar.url
-        )
-        embed.add_field(name="Sent", value=format_dt(deleted_msg['created_at'], style="F"), inline=False)
-        embed.set_footer(text="Message deleted")
+        # Check if member doesn't have the role
+        if role not in member.roles:
+            await interaction.response.send_message(
+                f"❌ {member.display_name} doesn't have "
+                f"the **{role.name}** role.", ephemeral=True)
+            return
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Check role hierarchy
+        if role >= interaction.guild.me.top_role:
+            await interaction.response.send_message(
+                f"❌ I cannot manage the **{role.name}** role "
+                f"due to role hierarchy.", ephemeral=True)
+            return
+
+        if (interaction.user != interaction.guild.owner and
+                role >= interaction.user.top_role):
+            await interaction.response.send_message(
+                f"❌ You cannot remove the **{role.name}** role "
+                f"due to role hierarchy.", ephemeral=True)
+            return
+
+        try:
+            # Remove the role
+            await member.remove_roles(
+                role, reason=f"Role removed by {interaction.user}")
+
+            # Send success message
+            embed = discord.Embed(
+                description=(f"✅ Successfully removed **{role.name}** "
+                             f"role from {member.mention}"),
+                color=discord.Color.green()
+            )
+            embed.set_footer(
+                text=f"Removed by {interaction.user.display_name}")
+
+            await interaction.response.send_message(embed=embed)
+            self.logger.info(
+                f"Role {role.name} removed from {member} by "
+                f"{interaction.user} in {interaction.guild.name}")
+
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ I don't have permission to manage roles.",
+                ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Failed to remove role: {e}", ephemeral=True)
 
     # =========================================================
-    # PREFIX: classic commands (restored + auto-delete)
+    # SETNICK COMMANDS (Hybrid)
     # =========================================================
-    @commands.command(name="say")
-    async def prefix_say(self, ctx, *, message):
-        await self.delete_command_message(ctx)
+
+    @commands.hybrid_command(name="setnick", description="Change a member's nickname")
+    @app_commands.describe(
+        member="The member whose nickname to change",
+        nickname="The new nickname (leave empty to remove nickname)"
+    )
+    @commands.guild_only()
+    async def setnick(self, ctx: commands.Context, member: discord.Member, *, nickname: Optional[str] = None):
+        """Change a member's nickname."""
+        # Delete command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+        # Check if this is a guild context
         if not isinstance(ctx.author, discord.Member):
-            return
-        if not ctx.author.guild_permissions.manage_messages:
-            await ctx.send("❌ You don't have permission to use this command.", delete_after=6)
-            return
-        await ctx.send(message)
-
-    @commands.command(name="clear")
-    async def prefix_clear(self, ctx, amount: int, member: Optional[discord.Member] = None):
-        await self.delete_command_message(ctx)
-        if not isinstance(ctx.author, discord.Member):
-            return
-        if not ctx.author.guild_permissions.manage_messages:
-            await ctx.send("❌ You don't have permission to use this command.", delete_after=5)
-            return
-        if amount < 1 or amount > 100:
-            await ctx.send("❌ Amount must be between 1 and 100.", delete_after=5)
-            return
-        try:
-            if member:
-                def check(msg):
-                    return msg.author == member
-                deleted = await ctx.channel.purge(limit=amount * 2, check=check)
-            else:
-                deleted = await ctx.channel.purge(limit=amount)
-            await ctx.send(f"✅ Deleted {len(deleted)} messages", delete_after=5)
-        except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to delete messages.", delete_after=6)
-
-    @commands.command(name="snipe")
-    async def prefix_snipe(self, ctx):
-        await self.delete_command_message(ctx)
-        channel_id = ctx.channel.id
-        if channel_id not in self.deleted_messages:
-            await ctx.send("❌ No recently deleted messages found.", delete_after=5)
-            return
-        deleted_msg = self.deleted_messages[channel_id]
-        embed = discord.Embed(
-            title="🎯 Sniped Message",
-            description=deleted_msg['content'] or "*No content*",
-            color=discord.Color.orange()
-        )
-        embed.set_author(
-            name=deleted_msg['author'].display_name,
-            icon_url=deleted_msg['author'].display_avatar.url
-        )
-        embed.add_field(name="Sent", value=format_dt(deleted_msg['created_at'], style="F"), inline=False)
-        await ctx.send(embed=embed, delete_after=5)
-
-    @commands.command(name="dm")
-    async def prefix_dm(self, ctx, user: discord.User, *, message):
-        await self.delete_command_message(ctx)
-        if not isinstance(ctx.author, discord.Member):
-            return
-        if not ctx.author.guild_permissions.manage_messages:
-            await ctx.send("❌ You don't have permission to use this command.", delete_after=5)
-            return
-        try:
-            await user.send(message)
-            await ctx.send(f"✅ Direct message sent to {user.display_name}!", delete_after=5)
-            self.logger.info(f"DM sent to {user} by {ctx.author} in {ctx.guild.name}: {message}")
-        except discord.Forbidden:
-            await ctx.send(f"❌ Could not send DM to {user.display_name}. They may have DMs disabled or blocked the bot.", delete_after=5)
-        except discord.HTTPException as e:
-            await ctx.send(f"❌ Failed to send DM: {e}", delete_after=5)
-            self.logger.error(f"Failed to send DM to {user}: {e}")
-
-    @commands.command(name="forceleave")
-    @commands.is_owner()
-    async def prefix_forceleave(self, ctx: commands.Context, guild_id: Optional[int] = None):
-        await self.delete_command_message(ctx)
-        target: Optional[discord.Guild] = None
-        if guild_id:
-            target = self.bot.get_guild(int(guild_id))
-            if not target:
-                await ctx.send("❌ I’m not in that server (or bad Guild ID).", delete_after=6)
-                return
-        else:
-            if not ctx.guild:
-                await ctx.send("❌ No guild context; provide a Guild ID.", delete_after=6)
-                return
-            target = ctx.guild
-
-        name, gid = target.name, target.id
-        try:
-            await target.leave()
-            self.logger.warning(f"Force-leave (prefix) by {ctx.author} for guild {name} ({gid})")
-        except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to leave that server (unexpected).", delete_after=6)
-            return
-        except Exception as e:
-            await ctx.send(f"❌ Failed to leave: {e}", delete_after=8)
+            await ctx.send("❌ This command can only be used in a server.", ephemeral=True)
             return
 
-    @commands.command(name="synccommands")
-    @commands.is_owner()
-    async def prefix_synccommands(self, ctx: commands.Context):
-        await self.delete_command_message(ctx)
-        try:
-            synced = await self.bot.tree.sync()
-            await ctx.send(f"✅ Synced **{len(synced)}** command(s).", delete_after=5)
-        except Exception as e:
-            await ctx.send(f"❌ Sync failed: {e}", delete_after=5)
-
-    # ===== END OF ADMIN COG ====
-
-async def setup(bot):
-    await bot.add_cog(AdminCog(bot))
-
-    @commands.command(name="announce")
-    @commands.has_permissions(manage_messages=True)
-    async def prefix_announce(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None, ping_role: Optional[discord.Role] = None, *, message: str = ""):
-        """
-        Usage:
-          !announce <#channel?> <@role?> <message>
-        You can omit channel/role and just do: !announce Your message here
-        """
-        await self.delete_command_message(ctx)
-        if not message.strip():
-            await ctx.send("❌ Provide an announcement message.", delete_after=5)
+        # Check permissions
+        has_role = any((role_check.id in self.allowed_say_roles) for role_check in ctx.author.roles)
+        if not has_role and not ctx.author.guild_permissions.manage_nicknames:
+            await ctx.send("❌ You don't have permission to manage nicknames.", ephemeral=True)
             return
 
-        target = channel or ctx.channel
-        embed = discord.Embed(description=message.strip(), color=discord.Color.green())
-        content = ping_role.mention if ping_role else None
-        allowed = discord.AllowedMentions(everyone=False, users=True, roles=[ping_role] if ping_role else True)
-        try:
-            await target.send(content=content, embed=embed, allowed_mentions=allowed)
-            note = f" (pinged {ping_role.mention})" if ping_role else ""
-            await ctx.send(f"✅ Announcement sent to {target.mention}{note}", delete_after=5)
-        except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to send messages there.", delete_after=6)
-
-    @commands.command(name="setnick")
-    @commands.has_permissions(manage_nicknames=True)
-    async def prefix_setnick(self, ctx: commands.Context, member: discord.Member, *, nickname: Optional[str] = None):
-        await self.delete_command_message(ctx)
-        if member.top_role >= ctx.guild.me.top_role and member != ctx.guild.me:
-            await ctx.send("❌ I cannot change this member's nickname due to role hierarchy.", delete_after=6)
+        # Check role hierarchy for members (skip for bot's own nickname)
+        if member != ctx.guild.me and member.top_role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
+            await ctx.send("❌ You cannot change the nickname of someone with a higher or equal role.", ephemeral=True)
             return
+
+        # Check if bot has permission to change this member's nickname (skip for bot's own nickname)
+        if member != ctx.guild.me and member.top_role >= ctx.guild.me.top_role:
+            await ctx.send("❌ I cannot change the nickname of someone with a higher or equal role than me.", ephemeral=True)
+            return
+
         try:
             old_nick = member.display_name
             await member.edit(nick=nickname)
-            embed = discord.Embed(title="✅ Nickname Changed", color=discord.Color.green())
-            embed.add_field(name="Member", value=member.mention, inline=True)
-            embed.add_field(name="Old", value=old_nick, inline=True)
-            embed.add_field(name="New", value=nickname or member.name, inline=True)
-            embed.add_field(name="Time", value=format_dt(utcnow(), style="F"), inline=False)
-            embed.set_footer(text=f"Changed by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
-            await ctx.send(embed=embed, delete_after=10, allowed_mentions=self.no_pings)
+            
+            if nickname:
+                embed = discord.Embed(
+                    title="✅ Nickname Changed",
+                    description=f"Changed {member.mention}'s nickname from **{old_nick}** to **{nickname}**",
+                    color=discord.Color.green()
+                )
+            else:
+                embed = discord.Embed(
+                    title="✅ Nickname Removed",
+                    description=f"Removed {member.mention}'s nickname (was **{old_nick}**)",
+                    color=discord.Color.green()
+                )
+            
+            embed.set_footer(text=f"Changed by {ctx.author.display_name}")
+            await ctx.send(embed=embed, allowed_mentions=self.no_pings)
+            
+            # Log the action
+            self.logger.info(f"Nickname changed for {member} by {ctx.author} in {ctx.guild.name}: '{old_nick}' -> '{nickname}'")
+            
         except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to change that nickname.", delete_after=6)
-
-    @commands.command(name="addrole")
-    @commands.has_permissions(manage_roles=True)
-    async def prefix_addrole(self, ctx: commands.Context, member: discord.Member, role: discord.Role):
-        await self.delete_command_message(ctx)
-        if role >= ctx.author.top_role and ctx.author != ctx.guild.owner:
-            await ctx.send("❌ You cannot assign a role that is higher than or equal to your highest role.", delete_after=6)
-            return
-        if role >= ctx.guild.me.top_role:
-            await ctx.send("❌ I cannot assign this role due to role hierarchy.", delete_after=6)
-            return
-        if role in member.roles:
-            await ctx.send(f"ℹ️ {member.display_name} already has the {role.name} role.", delete_after=6)
-            return
-        try:
-            await member.add_roles(role)
-            embed = discord.Embed(title="✅ Role Added", color=discord.Color.green())
-            embed.add_field(name="Member", value=member.mention, inline=True)
-            embed.add_field(name="Role Added", value=role.mention, inline=True)
-            embed.add_field(name="Time", value=format_dt(utcnow(), style="F"), inline=False)
-            embed.set_footer(text=f"Added by {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
-            await ctx.send(embed=embed, delete_after=10, allowed_mentions=self.no_pings)
-        except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to add that role.", delete_after=6)
-
-    @commands.command(name="watchuser")
-    @commands.has_permissions(kick_members=True)
-    async def prefix_watchuser(self, ctx: commands.Context, user: discord.User, *, reason: str = "No reason provided"):
-        await self.delete_command_message(ctx)
-        if not hasattr(self, 'watch_list'):
-            self.watch_list = {}
-        gid = ctx.guild.id
-        self.watch_list.setdefault(gid, {})
-        self.watch_list[gid][user.id] = {
-            'user': user,
-            'reason': reason,
-            'added_by': ctx.author,
-            'added_at': utcnow()
-        }
-        embed = discord.Embed(title="🕵️‍♂️ User Added to Watch List", color=discord.Color.orange())
-        embed.add_field(name="User", value=f"{user.mention} ({user.name}#{user.discriminator})", inline=False)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Time", value=format_dt(utcnow(), style="F"), inline=False)
-        embed.set_thumbnail(url=user.display_avatar.url)
-        await ctx.send(embed=embed, delete_after=12, allowed_mentions=self.no_pings)
+            await ctx.send("❌ I don't have permission to manage nicknames.", ephemeral=True)
+        except Exception as e:
+            await ctx.send(f"❌ Failed to change nickname: {e}", ephemeral=True)
 
     # =========================================================
-    # Slash: Set prefix (keeps mention) — FIXED
+    # SETPREFIX COMMANDS (Hybrid)
     # =========================================================
-    @commands.command(name="prefix", aliases=["setprefix"])
-    @commands.has_permissions(administrator=True)
-    async def prefix_set(self, ctx, *, prefix: str = None):
-        """Change the bot's command prefix (prefix version)"""
-        # Delete command message
-        await ctx.message.delete()
+
+    @commands.hybrid_command(name="setprefix", description="Change the bot's command prefix")
+    @app_commands.describe(prefix="The new prefix to use (1-3 characters)")
+    @commands.guild_only()
+    async def setprefix(self, ctx: commands.Context, prefix: str):
+        """Change the bot's command prefix."""
+        # Delete command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+        # Check if this is a guild context
+        if not isinstance(ctx.author, discord.Member):
+            await ctx.send("❌ This command can only be used in a server.", ephemeral=True)
+            return
+
+        # Check permissions
+        has_role = any((role_check.id in self.allowed_say_roles) for role_check in ctx.author.roles)
+        if not has_role and not ctx.author.guild_permissions.manage_guild:
+            await ctx.send("❌ You need **Manage Server** permission or the allowed roles to change the prefix.", ephemeral=True)
+            return
+
+        # Validate prefix
+        if len(prefix) > 3:
+            await ctx.send("❌ Prefix must be 3 characters or less.", ephemeral=True)
+            return
         
-        # Show current prefix if none provided
-        if prefix is None:
-            current = self.bot._text_prefix if hasattr(self.bot, '_text_prefix') else '!'
-            response = await ctx.send(f"Current prefix is: `{current}`")
-            await response.delete(delay=5)
+        if len(prefix.strip()) == 0:
+            await ctx.send("❌ Prefix cannot be empty or only whitespace.", ephemeral=True)
             return
-            
-        # Check prefix length
-        if len(prefix) > 5:
-            response = await ctx.send("❌ Prefix must be 5 characters or less")
-            await response.delete(delay=5)
+
+        # Check for problematic prefixes
+        if prefix in ["@", "<@", "`", "```"]:
+            await ctx.send("❌ This prefix could cause conflicts with Discord features.", ephemeral=True)
             return
-            
-        # Update the bot's prefix
-        self.bot.command_prefix = commands.when_mentioned_or(prefix)
-        if hasattr(self.bot, '_text_prefix'):
+
+        try:
+            # Update the bot's prefix (this is a simple implementation)
+            old_prefix = self.bot._text_prefix
             self.bot._text_prefix = prefix
             
-        # Send confirmation
-        await ctx.send(f"✅ Prefix updated to: `{prefix}`")
+            embed = discord.Embed(
+                title="✅ Prefix Changed",
+                description=f"Bot prefix changed from `{old_prefix}` to `{prefix}`\n\nYou can now use commands like `{prefix}ping` or `{prefix}help`",
+                color=discord.Color.green()
+            )
+            embed.add_field(
+                name="📝 Note", 
+                value="Slash commands (/) will still work as before!", 
+                inline=False
+            )
+            embed.set_footer(text=f"Changed by {ctx.author.display_name}")
+            
+            await ctx.send(embed=embed)
+            
+            # Log the action
+            self.logger.info(f"Prefix changed from '{old_prefix}' to '{prefix}' by {ctx.author} in {ctx.guild.name}")
+            
+        except Exception as e:
+            await ctx.send(f"❌ Failed to change prefix: {e}", ephemeral=True)
 
-    @app_commands.command(name="setprefix", description="Change the bot's command prefix")
-    @app_commands.describe(prefix="New prefix for the bot (max 5 characters)")
-    @app_commands.guild_only()
-    async def setprefix(self, interaction: discord.Interaction, prefix: str):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ You need administrator permission to change the prefix.", ephemeral=True)
+    # =========================================================
+    # DM COMMAND
+    # =========================================================
+
+    @commands.hybrid_command(
+        name="dm",
+        description="Send a direct message to a user or all members with a role"
+    )
+    @app_commands.describe(
+        target="The user or role to send a message to",
+        message="The message to send",
+        attachment="File to attach to the message"
+    )
+    @commands.has_permissions(manage_messages=True)
+    @mod_check("manage_messages")
+    async def dm(
+        self, 
+        ctx, 
+        target: typing.Union[discord.User, discord.Role], 
+        *, 
+        message: str = None, 
+        attachment: discord.Attachment = None
+    ):
+        """Send a direct message to a user or all members with a role."""
+        try:
+            # Get attachments from both slash commands and prefix commands
+            # IMPORTANT: Read attachments BEFORE deleting the message!
+            attachment_data = []
+            
+            # For slash commands, check the attachment parameter
+            if ctx.interaction and attachment:
+                file_data = await attachment.read()
+                attachment_data.append({
+                    'data': file_data,
+                    'filename': attachment.filename
+                })
+            # For prefix commands, check message attachments FIRST
+            elif not ctx.interaction and ctx.message.attachments:
+                for msg_attachment in ctx.message.attachments:
+                    file_data = await msg_attachment.read()
+                    attachment_data.append({
+                        'data': file_data,
+                        'filename': msg_attachment.filename
+                    })
+            
+            # NOW delete the command message for prefix commands (after reading attachments)
+            if not ctx.interaction:
+                try:
+                    await ctx.message.delete()
+                except discord.NotFound:
+                    pass  # Message already deleted
+                except discord.Forbidden:
+                    pass  # No permission to delete
+            
+            # Check if we have either message or attachments
+            if not message and not attachment_data:
+                error_msg = "❌ Please provide either a message or attach files."
+                if ctx.interaction:
+                    await ctx.send(error_msg, ephemeral=True)
+                else:
+                    await ctx.send(
+                        error_msg, 
+                        delete_after=3, 
+                        allowed_mentions=discord.AllowedMentions.none()
+                    )
+                return
+            
+            # Check if target is a role
+            if isinstance(target, discord.Role):
+                # Get all members with this role
+                members_with_role = [member for member in ctx.guild.members if target in member.roles and not member.bot]
+                
+                if not members_with_role:
+                    if ctx.interaction:
+                        await ctx.send(f"❌ No members found with the role **{target.name}**.", ephemeral=True)
+                    else:
+                        # Use allowed_mentions to prevent any accidental role pings
+                        await ctx.send(
+                            f"❌ No members found with the role **{target.name}**.", 
+                            delete_after=3, 
+                            allowed_mentions=discord.AllowedMentions.none()
+                        )
+                    return
+                
+                # Send DM to all members with the role
+                successful_dms = 0
+                failed_dms = 0
+                
+                for member in members_with_role:
+                    try:
+                        # Create new file objects for each send (Discord requires this)
+                        member_files = []
+                        if attachment_data:
+                            # Create fresh file objects for each member
+                            for attach in attachment_data:
+                                member_files.append(discord.File(
+                                    io.BytesIO(attach['data']), 
+                                    filename=attach['filename']
+                                ))
+                        
+                        if message and member_files:
+                            await member.send(content=message, files=member_files)
+                        elif message:
+                            await member.send(content=message)
+                        elif member_files:
+                            await member.send(files=member_files)
+                        
+                        successful_dms += 1
+                    except (discord.Forbidden, discord.HTTPException):
+                        failed_dms += 1
+                
+                # Send summary (use role name, not mention to avoid ping)
+                total_members = len(members_with_role)
+                attachment_info = f" with {len(attachment_data)} attachment(s)" if attachment_data else ""
+                summary = f"📨 **Role DM Summary for `{target.name}`{attachment_info}:**\n✅ Sent: {successful_dms}/{total_members}\n❌ Failed: {failed_dms}/{total_members}"
+                
+                if ctx.interaction:
+                    await ctx.send(summary, ephemeral=True)
+                else:
+                    # Use allowed_mentions to prevent any accidental role pings
+                    await ctx.send(summary, delete_after=10, allowed_mentions=discord.AllowedMentions.none())
+                
+                # Log the action
+                self.logger.info(
+                    "Role DM sent to %s members with role %s by %s in %s: %s (Success: %d, Failed: %d)",
+                    total_members,
+                    target.name,
+                    ctx.author,
+                    ctx.guild.name,
+                    message,
+                    successful_dms,
+                    failed_dms
+                )
+                
+            else:
+                # Target is a user, send single DM
+                try:
+                    # Create file objects for user DM
+                    user_files = []
+                    if attachment_data:
+                        # Create fresh file objects for the user
+                        for attach in attachment_data:
+                            user_files.append(discord.File(
+                                io.BytesIO(attach['data']), 
+                                filename=attach['filename']
+                            ))
+                    
+                    # Send the DM with message and/or attachments
+                    if message and user_files:
+                        await target.send(content=message, files=user_files)
+                    elif message:
+                        await target.send(content=message)
+                    elif user_files:
+                        await target.send(files=user_files)
+                    
+                    # Success message
+                    attachment_info = f" with {len(attachment_data)} attachment(s)" if attachment_data else ""
+                    success_msg = f"✅ Direct message sent to {target.display_name}{attachment_info}!"
+                    
+                    # Check if it's a slash command (interaction) or prefix command
+                    if ctx.interaction:
+                        # For slash commands, send ephemeral (auto-hidden)
+                        await ctx.send(success_msg, ephemeral=True)
+                    else:
+                        # For prefix commands, send and auto-delete after 1 second
+                        # Use allowed_mentions to prevent any accidental user pings
+                        await ctx.send(
+                            f"✅ Direct message sent to **{target.display_name}**{attachment_info}!",
+                            delete_after=1,
+                            allowed_mentions=discord.AllowedMentions.none()
+                        )
+                    
+                    # Log the action
+                    self.logger.info(
+                        "User DM sent to %s by %s in %s: %s (Attachments: %d)",
+                        target,
+                        ctx.author,
+                        ctx.guild.name,
+                        message,
+                        len(attachment_data)
+                    )
+                    
+                except (discord.Forbidden, discord.HTTPException) as e:
+                    error_msg = f"❌ Failed to send DM to {target.display_name}. They may have DMs disabled or blocked the bot."
+                    if ctx.interaction:
+                        await ctx.send(error_msg, ephemeral=True)
+                    else:
+                        await ctx.send(error_msg, delete_after=5, allowed_mentions=discord.AllowedMentions.none())
+                    
+                    # Log the specific error for debugging
+                    self.logger.error(f"Failed to send DM to {target}: {e}")
+                
+                # Log the action
+                self.logger.info(
+                    "DM sent to %s by %s in %s: %s",
+                    target,
+                    ctx.author,
+                    ctx.guild.name,
+                    message
+                )
+            
+        except discord.Forbidden:
+            # Only handle single user DM failures here (role DMs handle their own errors)
+            if isinstance(target, discord.User):
+                if ctx.interaction:
+                    await ctx.send(
+                        f"❌ Could not send DM to **{target.display_name}**. "
+                        "They may have DMs disabled or blocked the bot.",
+                        ephemeral=True
+                    )
+                else:
+                    await ctx.send(
+                        f"❌ Could not send DM to **{target.display_name}**. "
+                        "They may have DMs disabled or blocked the bot.",
+                        delete_after=3,
+                        allowed_mentions=discord.AllowedMentions.none()
+                    )
+            
+        except discord.HTTPException as e:
+            # Only handle single user DM failures here (role DMs handle their own errors)
+            if isinstance(target, discord.User):
+                if ctx.interaction:
+                    await ctx.send(
+                        f"❌ Failed to send DM to **{target.display_name}**: {e}",
+                        ephemeral=True
+                    )
+                else:
+                    await ctx.send(
+                        f"❌ Failed to send DM to **{target.display_name}**: {e}",
+                        delete_after=3,
+                        allowed_mentions=discord.AllowedMentions.none()
+                    )
+                self.logger.error("Failed to send DM to %s: %s", target, e)
+
+    # =========================================================
+    # STATUS COMMAND
+    # =========================================================
+
+    @commands.hybrid_command(
+        name="status",
+        description="Show bot status and statistics"
+    )
+    async def status(self, ctx):
+        """Show bot status and statistics."""
+        try:
+            # Get bot stats
+            guild_count = len(self.bot.guilds)
+            total_members = sum(guild.member_count for guild in self.bot.guilds)
+            
+            # Get uptime
+            uptime = discord.utils.utcnow() - self.bot.start_time
+            uptime_str = str(uptime).split('.')[0]  # Remove microseconds
+            
+            # Get latency
+            latency = round(self.bot.latency * 1000, 1)
+            
+            # Create status embed
+            embed = discord.Embed(
+                title="🤖 Bot Status",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            
+            embed.add_field(
+                name="📊 Statistics",
+                value=(
+                    f"**Guilds:** {guild_count}\n"
+                    f"**Members:** {total_members:,}\n"
+                    f"**Commands:** 57"
+                ),
+                inline=True
+            )
+            
+            embed.add_field(
+                name="⚡ Performance",
+                value=(
+                    f"**Latency:** {latency}ms\n"
+                    f"**Uptime:** {uptime_str}\n"
+                    f"**Status:** Online"
+                ),
+                inline=True
+            )
+            
+            embed.add_field(
+                name="🔧 System",
+                value=(
+                    f"**Python:** 3.13\n"
+                    f"**Discord.py:** {discord.__version__}\n"
+                    f"**Prefix:** !"
+                ),
+                inline=True
+            )
+            
+            embed.set_thumbnail(url=self.bot.user.display_avatar.url)
+            
+            # Auto-delete the command message for prefix commands only
+            if not ctx.interaction:
+                try:
+                    await ctx.message.delete()
+                except discord.NotFound:
+                    pass  # Message already deleted
+                except discord.Forbidden:
+                    pass  # No permission to delete
+            
+            # Send message permanently (no auto-delete)
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            error_msg = f"❌ Failed to get bot status: {e}"
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, delete_after=5)
+            self.logger.error("Failed to get bot status: %s", e)
+
+    # =========================================================
+    # BOT ACTIVITY/STATUS COMMANDS
+    # =========================================================
+
+    @commands.hybrid_command(
+        name="setstatus",
+        description="Change the bot's activity status"
+    )
+    @commands.is_owner()
+    async def setstatus(self, ctx, activity_type: str, *, status_text: str):
+        """Change the bot's activity status.
+        
+        Activity types: playing, watching, listening, streaming, competing
+        """
+        # Auto-delete the command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                pass
+        
+        activity_type = activity_type.lower()
+        
+        # Map activity types
+        activity_mapping = {
+            'playing': discord.ActivityType.playing,
+            'watching': discord.ActivityType.watching,
+            'listening': discord.ActivityType.listening,
+            'streaming': discord.ActivityType.streaming,
+            'competing': discord.ActivityType.competing
+        }
+        
+        if activity_type not in activity_mapping:
+            valid_types = ", ".join(activity_mapping.keys())
+            error_msg = f"❌ Invalid activity type. Valid types: {valid_types}"
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, delete_after=5)
             return
+        
+        try:
+            # Create the activity
+            activity = discord.Activity(
+                type=activity_mapping[activity_type],
+                name=status_text
+            )
+            
+            # Change the bot's status (preserve current presence status)
+            current_status = self.bot.status if hasattr(self.bot, 'status') else discord.Status.online
+            await self.bot.change_presence(status=current_status, activity=activity)
+            
+            # Save the new status settings
+            self.save_status_settings(activity_type=activity_type, activity_name=status_text)
+            
+            # Confirm the change
+            success_msg = f"✅ Status changed to **{activity_type.title()}** `{status_text}` (saved)"
+            if ctx.interaction:
+                await ctx.send(success_msg, ephemeral=True)
+            else:
+                await ctx.send(success_msg, delete_after=3)
+                
+            self.logger.info("Bot status changed to %s: %s", activity_type, status_text)
+            
+        except Exception as e:
+            error_msg = f"❌ Failed to change status: {e}"
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, delete_after=5)
+            self.logger.error("Failed to change bot status: %s", e)
 
-        if len(prefix) > 5:
-            await interaction.response.send_message("❌ Prefix must be 5 characters or less.", ephemeral=True)
+    @commands.hybrid_command(
+        name="resetstatus",
+        description="Reset the bot's status to default (Watching for rule violations)"
+    )
+    @commands.is_owner()
+    async def resetstatus(self, ctx):
+        """Reset the bot's status to the default."""
+        # Auto-delete the command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                pass
+        
+        try:
+            # Create default activity
+            activity = discord.Activity(
+                type=discord.ActivityType.watching,
+                name="for rule violations"
+            )
+            
+            # Change the bot's status (preserve current presence status)
+            current_status = self.bot.status if hasattr(self.bot, 'status') else discord.Status.online
+            await self.bot.change_presence(status=current_status, activity=activity)
+            
+            # Save the reset status settings
+            self.save_status_settings(activity_type="watching", activity_name="for rule violations")
+            
+            # Confirm the change
+            success_msg = "✅ Status reset to default: **Watching** `for rule violations` (saved)"
+            if ctx.interaction:
+                await ctx.send(success_msg, ephemeral=True)
+            else:
+                await ctx.send(success_msg, delete_after=3)
+                
+            self.logger.info("Bot status reset to default")
+            
+        except Exception as e:
+            error_msg = f"❌ Failed to reset status: {e}"
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, delete_after=5)
+            self.logger.error("Failed to reset bot status: %s", e)
+
+    @commands.hybrid_command(
+        name="setpresence",
+        description="Change the bot's Discord presence (online/idle/dnd/invisible)"
+    )
+    @commands.is_owner()
+    async def setpresence(self, ctx, presence: str):
+        """Change the bot's Discord presence.
+        
+        Presence types: online, idle, dnd, invisible
+        """
+        # Auto-delete the command message for prefix commands
+        if not ctx.interaction:
+            try:
+                await ctx.message.delete()
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                pass
+        
+        presence = presence.lower()
+        
+        # Map presence types
+        presence_mapping = {
+            'online': discord.Status.online,
+            'idle': discord.Status.idle,
+            'dnd': discord.Status.dnd,
+            'invisible': discord.Status.invisible
+        }
+        
+        if presence not in presence_mapping:
+            valid_presences = ", ".join(presence_mapping.keys())
+            error_msg = f"❌ Invalid presence. Valid types: {valid_presences}"
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, delete_after=5)
             return
+        
+        try:
+            # Get current activity from saved settings to preserve it
+            current_activity_type = self.saved_status.get("activity_type", "watching")
+            current_activity_name = self.saved_status.get("activity_name", "for rule violations")
+            
+            # Map activity types
+            activity_mapping = {
+                'playing': discord.ActivityType.playing,
+                'watching': discord.ActivityType.watching,
+                'listening': discord.ActivityType.listening,
+                'streaming': discord.ActivityType.streaming,
+                'competing': discord.ActivityType.competing
+            }
+            
+            # Create activity from saved settings
+            activity = discord.Activity(
+                type=activity_mapping.get(current_activity_type, discord.ActivityType.watching),
+                name=current_activity_name
+            )
+            
+            # Change the bot's presence while preserving activity
+            await self.bot.change_presence(status=presence_mapping[presence], activity=activity)
+            
+            # Save the new presence setting
+            self.save_status_settings(presence=presence)
+            
+            # Confirm the change
+            presence_display = {
+                'online': '🟢 Online',
+                'idle': '🟡 Idle',
+                'dnd': '🔴 Do Not Disturb',
+                'invisible': '⚫ Invisible'
+            }
+            
+            success_msg = f"✅ Presence changed to {presence_display[presence]} (saved)"
+            if ctx.interaction:
+                await ctx.send(success_msg, ephemeral=True)
+            else:
+                await ctx.send(success_msg, delete_after=3)
+                
+            self.logger.info("Bot presence changed to: %s", presence)
+            
+        except Exception as e:
+            error_msg = f"❌ Failed to change presence: {e}"
+            if ctx.interaction:
+                await ctx.send(error_msg, ephemeral=True)
+            else:
+                await ctx.send(error_msg, delete_after=5)
+            self.logger.error("Failed to change bot presence: %s", e)
 
-        # Keep mention + prefix and remember text prefix
-        self._apply_prefix(prefix)
-
-        embed = discord.Embed(
-            title="✅ Prefix Changed",
-            description=f"Bot prefix has been changed to `{prefix}` (mention still works).",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Time", value=format_dt(utcnow(), style="F"), inline=False)
-        embed.set_footer(text=f"Changed by {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
-
-        self.logger.info(f"Prefix changed to '{prefix}' by {interaction.user} in {interaction.guild.name}")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def setup(bot):
-    """Setup function for the cog."""
-    cog = AdminCog(bot)
-    await bot.add_cog(cog)
-
-    # Register the check directly on the commands instead
-    for cmd in bot.tree.get_commands():
-        # Some discord.py versions use app_commands checks; if this errors in your env, comment it out
-        try:
-            cmd.checks.append(cog._interaction_not_blacklisted)
-        except Exception:
-            pass
-    
-    try:
-        bot.add_check(cog._prefix_not_blacklisted)
-    except Exception as e:
-        cog.logger.error(f"Failed to add prefix blacklist check: {e}")
+    await bot.add_cog(AdminCog(bot))

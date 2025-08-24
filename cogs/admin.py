@@ -8,10 +8,12 @@ import os
 import json
 import asyncio
 import io
+import httpx
 from datetime import datetime
 import discord
 from discord.ext import commands
 from discord import app_commands
+from utils.permissions import mod_check
 from typing import Optional, Set, Union
 import typing
 import logging
@@ -376,10 +378,41 @@ class AdminCog(commands.Cog):
                 await ctx.send(embed=error_embed, ephemeral=True)
                 self.logger.warning("TRIGEN API tokens exhausted")
             else:
-                self.logger.error(f"Alt generation failed: {e}")
+                self.logger.error(f"Alt generation failed with RuntimeError: {e}")
                 await ctx.send("❌ An unexpected error occurred. Please try again later.", ephemeral=True)
+        except httpx.HTTPStatusError as e:
+            # Handle HTTP errors from TRIGEN API more specifically
+            if e.response.status_code in [402, 429]:  # Payment Required or Too Many Requests
+                error_embed = discord.Embed(
+                    title="🪙 API Tokens Exhausted",
+                    description="❌ **The API has no tokens left!**\n\nPlease contact the bot administrator to refill the token balance.",
+                    color=0xFF6B6B,
+                    timestamp=discord.utils.utcnow()
+                )
+                error_embed.set_footer(text="TRIGEN API • Token Balance: 0")
+                await ctx.send(embed=error_embed, ephemeral=True)
+                self.logger.warning(f"TRIGEN API quota exhausted - HTTP {e.response.status_code}")
+            elif e.response.status_code == 403:
+                # Check if 403 is due to token exhaustion
+                response_text = e.response.text.lower()
+                if any(phrase in response_text for phrase in ["quota", "token", "limit", "exceeded", "insufficient"]):
+                    error_embed = discord.Embed(
+                        title="🪙 API Tokens Exhausted",
+                        description="❌ **The API has no tokens left!**\n\nPlease contact the bot administrator to refill the token balance.",
+                        color=0xFF6B6B,
+                        timestamp=discord.utils.utcnow()
+                    )
+                    error_embed.set_footer(text="TRIGEN API • Token Balance: 0")
+                    await ctx.send(embed=error_embed, ephemeral=True)
+                    self.logger.warning(f"TRIGEN API quota exhausted - HTTP 403: {response_text}")
+                else:
+                    self.logger.error(f"TRIGEN API forbidden error: {e}")
+                    await ctx.send("❌ API access denied. Please contact the bot administrator.", ephemeral=True)
+            else:
+                self.logger.error(f"TRIGEN API HTTP error: {e}")
+                await ctx.send("❌ API service temporarily unavailable. Please try again later.", ephemeral=True)
         except Exception as e:
-            self.logger.error(f"Alt generation failed: {e}")
+            self.logger.error(f"Alt generation failed with unexpected error: {e}")
             await ctx.send("❌ An unexpected error occurred. Please try again later.", ephemeral=True)
 
     # =========================================================
@@ -555,22 +588,28 @@ class AdminCog(commands.Cog):
             embed.set_footer(text=f"Added by {ctx.author.display_name}")
             
         elif isinstance(target, discord.Member):
-            # Add user to mod whitelist via role system (we'll add them to a special mod role)
-            # For now, we'll use the existing role-based system and provide guidance
+            # Add user directly to mod whitelist (no role assignment needed)
+            self.bot.add_mod_user(ctx.guild.id, target.id)
+            
             embed = discord.Embed(
-                title="ℹ️ User Mod Access",
-                description=f"To give **{target.mention}** mod permissions, please:\n\n1. Create or use a mod role\n2. Assign that role to the user\n3. Use `/addmod @role` to add the role to the whitelist",
-                color=discord.Color.blue(),
+                title="✅ User Added to Mod Team",
+                description=f"**{target.mention}** now has access to all bot commands (except alt generation).",
+                color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             embed.add_field(
-                name="💡 Tip",
-                value="This role-based system provides better permission management and can be applied to multiple users at once.",
+                name="📋 Permissions Granted",
+                value="• All moderation commands\n• All utility commands\n• Admin commands (if admin)\n• ❌ Alt generation (excluded)",
                 inline=False
             )
+            embed.add_field(
+                name="ℹ️ Note",
+                value="User permissions are managed by the bot internally. No Discord role assignment required.",
+                inline=False
+            )
+            embed.set_footer(text=f"Added by {ctx.author.display_name}")
         
         await ctx.send(embed=embed, ephemeral=True)
-
     @commands.hybrid_command(name="removemod", description="Remove a user or role from mod whitelist")
     @app_commands.describe(target="User or role to remove mod permissions from")
     @commands.guild_only()
@@ -601,17 +640,27 @@ class AdminCog(commands.Cog):
                 )
                 
         elif isinstance(target, discord.Member):
-            embed = discord.Embed(
-                title="ℹ️ User Mod Removal",
-                description=f"To remove **{target.mention}** mod permissions:\n\n1. Remove their mod role(s)\n2. Or use `/removemod @role` to remove the role from whitelist",
-                color=discord.Color.blue(),
-                timestamp=discord.utils.utcnow()
-            )
-            embed.add_field(
-                name="💡 Current Method",
-                value="The bot uses role-based permissions. Remove the user from mod roles or remove roles from the whitelist.",
-                inline=False
-            )
+            # Remove user from mod whitelist
+            removed = self.bot.remove_mod_user(ctx.guild.id, target.id)
+            if removed:
+                embed = discord.Embed(
+                    title="✅ User Removed from Mod Team",
+                    description=f"**{target.mention}** no longer has mod access to bot commands.",
+                    color=discord.Color.red(),
+                    timestamp=discord.utils.utcnow()
+                )
+                embed.add_field(
+                    name="� Permissions Revoked",
+                    value="• All moderation commands\n• All utility commands\n• Admin commands (unless admin)",
+                    inline=False
+                )
+                embed.set_footer(text=f"Removed by {ctx.author.display_name}")
+            else:
+                embed = discord.Embed(
+                    title="ℹ️ User Not Found",
+                    description=f"**{target.mention}** wasn't in the mod whitelist.",
+                    color=discord.Color.orange()
+                )
         
         await ctx.send(embed=embed, ephemeral=True)
 
@@ -619,33 +668,48 @@ class AdminCog(commands.Cog):
     @commands.guild_only() 
     @commands.has_permissions(administrator=True)
     async def list_mods(self, ctx: commands.Context):
-        """List all roles with mod permissions."""
+        """List all roles and users with mod permissions."""
         mod_roles = self.bot.mod_whitelist.get(str(ctx.guild.id), [])
+        mod_users = self.bot.mod_whitelist_users.get(str(ctx.guild.id), [])
         
-        if not mod_roles:
+        if not mod_roles and not mod_users:
             embed = discord.Embed(
                 title="📋 Mod Whitelist",
-                description="No roles are currently whitelisted for mod commands.",
+                description="No roles or users are currently whitelisted for mod commands.",
                 color=discord.Color.blue()
             )
             embed.add_field(
                 name="💡 Get Started",
-                value="Use `/addmod @role` to give a role access to all bot commands (except alt generation).",
+                value="Use `/addmod @role` or `/addmod @user` to give access to all bot commands (except alt generation).",
                 inline=False
             )
         else:
-            role_list = []
-            for role_id in mod_roles:
-                role = ctx.guild.get_role(role_id)
-                if role:
-                    member_count = len(role.members)
-                    role_list.append(f"• {role.mention} ({member_count} members)")
-                else:
-                    role_list.append(f"• ~~Deleted Role~~ (ID: {role_id})")
+            description_parts = []
+            
+            if mod_roles:
+                role_list = []
+                for role_id in mod_roles:
+                    role = ctx.guild.get_role(role_id)
+                    if role:
+                        member_count = len(role.members)
+                        role_list.append(f"• {role.mention} ({member_count} members)")
+                    else:
+                        role_list.append(f"• ~~Deleted Role~~ (ID: {role_id})")
+                description_parts.append(f"**{len(mod_roles)} role(s):**\n" + "\n".join(role_list))
+            
+            if mod_users:
+                user_list = []
+                for user_id in mod_users:
+                    user = ctx.guild.get_member(user_id)
+                    if user:
+                        user_list.append(f"• {user.mention}")
+                    else:
+                        user_list.append(f"• ~~Left Server~~ (ID: {user_id})")
+                description_parts.append(f"**{len(mod_users)} user(s):**\n" + "\n".join(user_list))
             
             embed = discord.Embed(
                 title="📋 Mod Whitelist",
-                description=f"**{len(mod_roles)} role(s)** have mod permissions:\n\n" + "\n".join(role_list),
+                description="\n\n".join(description_parts),
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
@@ -1232,11 +1296,44 @@ class AdminCog(commands.Cog):
         name="dm",
         description="Send a direct message to a user or all members with a role"
     )
+    @app_commands.describe(
+        target="The user or role to send a message to",
+        message="The message to send",
+        attachment="File to attach to the message"
+    )
     @commands.has_permissions(manage_messages=True)
-    async def dm(self, ctx, target: typing.Union[discord.User, discord.Role], *, message: str = None):
+    @mod_check("manage_messages")
+    async def dm(
+        self, 
+        ctx, 
+        target: typing.Union[discord.User, discord.Role], 
+        *, 
+        message: str = None, 
+        attachment: discord.Attachment = None
+    ):
         """Send a direct message to a user or all members with a role."""
         try:
-            # Auto-delete the command message for prefix commands only
+            # Get attachments from both slash commands and prefix commands
+            # IMPORTANT: Read attachments BEFORE deleting the message!
+            attachment_data = []
+            
+            # For slash commands, check the attachment parameter
+            if ctx.interaction and attachment:
+                file_data = await attachment.read()
+                attachment_data.append({
+                    'data': file_data,
+                    'filename': attachment.filename
+                })
+            # For prefix commands, check message attachments FIRST
+            elif not ctx.interaction and ctx.message.attachments:
+                for msg_attachment in ctx.message.attachments:
+                    file_data = await msg_attachment.read()
+                    attachment_data.append({
+                        'data': file_data,
+                        'filename': msg_attachment.filename
+                    })
+            
+            # NOW delete the command message for prefix commands (after reading attachments)
             if not ctx.interaction:
                 try:
                     await ctx.message.delete()
@@ -1245,22 +1342,17 @@ class AdminCog(commands.Cog):
                 except discord.Forbidden:
                     pass  # No permission to delete
             
-            # Get attachments from the original message (for prefix commands)
-            attachments = []
-            if not ctx.interaction and ctx.message.attachments:
-                # For prefix commands, get attachments from the message
-                for attachment in ctx.message.attachments:
-                    # Convert attachment to discord.File for sending
-                    file_data = await attachment.read()
-                    attachments.append(discord.File(io.BytesIO(file_data), filename=attachment.filename))
-            
             # Check if we have either message or attachments
-            if not message and not attachments:
-                error_msg = "❌ Please provide either a message or attach files to send."
+            if not message and not attachment_data:
+                error_msg = "❌ Please provide either a message or attach files."
                 if ctx.interaction:
                     await ctx.send(error_msg, ephemeral=True)
                 else:
-                    await ctx.send(error_msg, delete_after=3, allowed_mentions=discord.AllowedMentions.none())
+                    await ctx.send(
+                        error_msg, 
+                        delete_after=3, 
+                        allowed_mentions=discord.AllowedMentions.none()
+                    )
                 return
             
             # Check if target is a role
@@ -1288,12 +1380,13 @@ class AdminCog(commands.Cog):
                     try:
                         # Create new file objects for each send (Discord requires this)
                         member_files = []
-                        if attachments:
-                            # Re-read the files for each member
-                            if not ctx.interaction and ctx.message.attachments:
-                                for attachment in ctx.message.attachments:
-                                    file_data = await attachment.read()
-                                    member_files.append(discord.File(io.BytesIO(file_data), filename=attachment.filename))
+                        if attachment_data:
+                            # Create fresh file objects for each member
+                            for attach in attachment_data:
+                                member_files.append(discord.File(
+                                    io.BytesIO(attach['data']), 
+                                    filename=attach['filename']
+                                ))
                         
                         if message and member_files:
                             await member.send(content=message, files=member_files)
@@ -1308,7 +1401,7 @@ class AdminCog(commands.Cog):
                 
                 # Send summary (use role name, not mention to avoid ping)
                 total_members = len(members_with_role)
-                attachment_info = f" with {len(attachments)} attachment(s)" if attachments else ""
+                attachment_info = f" with {len(attachment_data)} attachment(s)" if attachment_data else ""
                 summary = f"📨 **Role DM Summary for `{target.name}`{attachment_info}:**\n✅ Sent: {successful_dms}/{total_members}\n❌ Failed: {failed_dms}/{total_members}"
                 
                 if ctx.interaction:
@@ -1334,12 +1427,13 @@ class AdminCog(commands.Cog):
                 try:
                     # Create file objects for user DM
                     user_files = []
-                    if attachments:
-                        # Re-read the files for the user
-                        if not ctx.interaction and ctx.message.attachments:
-                            for attachment in ctx.message.attachments:
-                                file_data = await attachment.read()
-                                user_files.append(discord.File(io.BytesIO(file_data), filename=attachment.filename))
+                    if attachment_data:
+                        # Create fresh file objects for the user
+                        for attach in attachment_data:
+                            user_files.append(discord.File(
+                                io.BytesIO(attach['data']), 
+                                filename=attach['filename']
+                            ))
                     
                     # Send the DM with message and/or attachments
                     if message and user_files:
@@ -1350,7 +1444,7 @@ class AdminCog(commands.Cog):
                         await target.send(files=user_files)
                     
                     # Success message
-                    attachment_info = f" with {len(attachments)} attachment(s)" if attachments else ""
+                    attachment_info = f" with {len(attachment_data)} attachment(s)" if attachment_data else ""
                     success_msg = f"✅ Direct message sent to {target.display_name}{attachment_info}!"
                     
                     # Check if it's a slash command (interaction) or prefix command
@@ -1373,7 +1467,7 @@ class AdminCog(commands.Cog):
                         ctx.author,
                         ctx.guild.name,
                         message,
-                        len(attachments)
+                        len(attachment_data)
                     )
                     
                 except (discord.Forbidden, discord.HTTPException) as e:
@@ -1382,6 +1476,9 @@ class AdminCog(commands.Cog):
                         await ctx.send(error_msg, ephemeral=True)
                     else:
                         await ctx.send(error_msg, delete_after=5, allowed_mentions=discord.AllowedMentions.none())
+                    
+                    # Log the specific error for debugging
+                    self.logger.error(f"Failed to send DM to {target}: {e}")
                 
                 # Log the action
                 self.logger.info(
@@ -1393,15 +1490,6 @@ class AdminCog(commands.Cog):
                 )
             
         except discord.Forbidden:
-            # Auto-delete the command message for prefix commands only
-            if not ctx.interaction:
-                try:
-                    await ctx.message.delete()
-                except discord.NotFound:
-                    pass  # Message already deleted
-                except discord.Forbidden:
-                    pass  # No permission to delete
-            
             # Only handle single user DM failures here (role DMs handle their own errors)
             if isinstance(target, discord.User):
                 if ctx.interaction:
@@ -1419,15 +1507,6 @@ class AdminCog(commands.Cog):
                     )
             
         except discord.HTTPException as e:
-            # Auto-delete the command message for prefix commands only
-            if not ctx.interaction:
-                try:
-                    await ctx.message.delete()
-                except discord.NotFound:
-                    pass  # Message already deleted
-                except discord.Forbidden:
-                    pass  # No permission to delete
-            
             # Only handle single user DM failures here (role DMs handle their own errors)
             if isinstance(target, discord.User):
                 if ctx.interaction:

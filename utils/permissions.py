@@ -4,7 +4,8 @@ Helper functions for checking permissions and role hierarchy.
 """
 
 import discord
-from typing import Union
+from typing import Union, Optional
+from discord.ext import commands
 
 def has_moderation_permissions(moderator: discord.Member, target: discord.Member) -> bool:
     """
@@ -152,3 +153,77 @@ def check_bot_permissions(guild: discord.Guild, required_permissions: list) -> t
             missing.append(perm)
     
     return len(missing) == 0, missing
+
+
+def is_mod_whitelisted(member: discord.Member, bot) -> bool:
+    """
+    Check if a member has mod whitelist permissions via their roles or user ID.
+    
+    Args:
+        member: The member to check
+        bot: The bot instance with mod_whitelist and mod_whitelist_users
+    
+    Returns:
+        bool: True if member has mod permissions via whitelist
+    """
+    # Check role-based whitelist
+    if hasattr(bot, 'mod_whitelist') and bot.mod_whitelist:
+        guild_whitelist = bot.mod_whitelist.get(str(member.guild.id), [])
+        if guild_whitelist:
+            # Check if any of the member's roles are in the whitelist
+            member_role_ids = [role.id for role in member.roles]
+            if any(role_id in guild_whitelist for role_id in member_role_ids):
+                return True
+    
+    # Check user-based whitelist
+    if hasattr(bot, 'mod_whitelist_users') and bot.mod_whitelist_users:
+        guild_user_whitelist = bot.mod_whitelist_users.get(
+            str(member.guild.id), [])
+        if member.id in guild_user_whitelist:
+            return True
+    
+    return False
+
+
+def has_mod_permissions(member: discord.Member, bot,
+                        required_discord_perm: Optional[str] = None) -> bool:
+    """
+    Check if member has mod permissions via Discord perms OR mod whitelist.
+    
+    Args:
+        member: The member to check
+        bot: The bot instance
+        required_discord_perm: Discord permission name to check
+    
+    Returns:
+        bool: True if member has required permissions
+    """
+    # Always allow administrators
+    if member.guild_permissions.administrator:
+        return True
+    
+    # Check specific Discord permission if provided
+    if required_discord_perm:
+        discord_perm = getattr(member.guild_permissions,
+                               required_discord_perm, False)
+        if discord_perm:
+            return True
+    
+    # Check mod whitelist
+    return is_mod_whitelisted(member, bot)
+
+
+def mod_check(required_discord_perm: Optional[str] = None):
+    """
+    Decorator factory for creating custom permission checks.
+    
+    Args:
+        required_discord_perm: Discord permission name
+    
+    Returns:
+        Command check decorator
+    """
+    async def predicate(ctx):
+        return has_mod_permissions(ctx.author, ctx.bot, required_discord_perm)
+    
+    return commands.check(predicate)

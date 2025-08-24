@@ -12,6 +12,7 @@ from discord.ext import commands
 from discord import app_commands
 from datetime import timedelta
 from typing import Optional
+from utils.permissions import mod_check
 
 from utils.permissions import has_moderation_permissions, has_higher_role
 
@@ -517,8 +518,12 @@ class ModerationCog(commands.Cog):
     async def purge(self, interaction: discord.Interaction, amount: int, user: Optional[discord.Member] = None):
         if not isinstance(interaction.user, discord.Member) or not interaction.guild:
             return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
-        if not interaction.user.guild_permissions.manage_messages:
-            return await interaction.response.send_message("❌ You need **Manage Messages**.", ephemeral=True)
+        
+        # Check if user has mod permissions (Discord perms OR mod whitelist)
+        from utils.permissions import has_mod_permissions
+        if not has_mod_permissions(interaction.user, self.bot, "manage_messages"):
+            return await interaction.response.send_message("❌ You need **Manage Messages** permission or be on the mod whitelist.", ephemeral=True)
+        
         if amount < 1 or amount > 100:
             return await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
 
@@ -540,8 +545,12 @@ class ModerationCog(commands.Cog):
     async def purge_attachments(self, interaction: discord.Interaction, amount: int):
         if not isinstance(interaction.user, discord.Member) or not interaction.guild:
             return await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
-        if not interaction.user.guild_permissions.manage_messages:
-            return await interaction.response.send_message("❌ You need **Manage Messages**.", ephemeral=True)
+        
+        # Check if user has mod permissions (Discord perms OR mod whitelist)
+        from utils.permissions import has_mod_permissions
+        if not has_mod_permissions(interaction.user, self.bot, "manage_messages"):
+            return await interaction.response.send_message("❌ You need **Manage Messages** permission or be on the mod whitelist.", ephemeral=True)
+        
         if amount < 1 or amount > 100:
             return await interaction.response.send_message("❌ Amount must be between 1 and 100.", ephemeral=True)
 
@@ -1071,7 +1080,7 @@ class ModerationCog(commands.Cog):
     # Purge variants (prefix)
     # ------------------------------
     @commands.command(name="purge")
-    @commands.has_permissions(manage_messages=True)
+    @mod_check("manage_messages")
     async def p_purge(self, ctx, amount: int, member: Optional[discord.Member] = None):
         await self.delete_command_message(ctx)
         if amount < 1 or amount > 100:
@@ -1089,7 +1098,7 @@ class ModerationCog(commands.Cog):
             await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
 
     @commands.command(name="purgeattachments")
-    @commands.has_permissions(manage_messages=True)
+    @mod_check("manage_messages")
     async def p_purge_attachments(self, ctx, amount: int):
         await self.delete_command_message(ctx)
         if amount < 1 or amount > 100:
@@ -1103,7 +1112,7 @@ class ModerationCog(commands.Cog):
             await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
 
     @commands.command(name="purgeinvites")
-    @commands.has_permissions(manage_messages=True)
+    @mod_check("manage_messages")
     async def p_purge_invites(self, ctx, amount: int):
         await self.delete_command_message(ctx)
         if amount < 1 or amount > 100:
@@ -1118,7 +1127,7 @@ class ModerationCog(commands.Cog):
             await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
 
     @commands.command(name="purgelinks")
-    @commands.has_permissions(manage_messages=True)
+    @mod_check("manage_messages")
     async def p_purge_links(self, ctx, amount: int):
         await self.delete_command_message(ctx)
         if amount < 1 or amount > 100:
@@ -1133,7 +1142,7 @@ class ModerationCog(commands.Cog):
             await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
 
     @commands.command(name="purgebots")
-    @commands.has_permissions(manage_messages=True)
+    @mod_check("manage_messages")
     async def p_purge_bots(self, ctx, amount: int):
         await self.delete_command_message(ctx)
         if amount < 1 or amount > 100:
@@ -1147,7 +1156,7 @@ class ModerationCog(commands.Cog):
             await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
 
     @commands.command(name="purgetext")
-    @commands.has_permissions(manage_messages=True)
+    @mod_check("manage_messages")
     async def p_purge_text(self, ctx, amount: int, *, query: str):
         await self.delete_command_message(ctx)
         if amount < 1 or amount > 100:
@@ -1164,7 +1173,7 @@ class ModerationCog(commands.Cog):
             await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
 
     @commands.command(name="purgebefore")
-    @commands.has_permissions(manage_messages=True)
+    @mod_check("manage_messages")
     async def p_purge_before(self, ctx, amount: int, message_id: int):
         await self.delete_command_message(ctx)
         if amount < 1 or amount > 100:
@@ -1180,7 +1189,7 @@ class ModerationCog(commands.Cog):
             await ctx.send("❌ I don't have permission to delete messages.", delete_after=5)
 
     @commands.command(name="purgeafter")
-    @commands.has_permissions(manage_messages=True)
+    @mod_check("manage_messages")
     async def p_purge_after(self, ctx, amount: int, message_id: int):
         await self.delete_command_message(ctx)
         if amount < 1 or amount > 100:

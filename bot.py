@@ -57,9 +57,10 @@ class DiscordBot(commands.Bot):
         self.logger = logging.getLogger(__name__)
 
         # ---- runtime state / persistence containers (MOVED OUT OF on_message) ----
-        self.mod_whitelist: Dict[str, List[int]] = {}
+        self.mod_whitelist: Dict[str, List[int]] = {}  # Role-based
+        self.mod_whitelist_users: Dict[str, List[int]] = {}  # User-based
         self.alt_whitelist_users: Dict[int, Set[int]] = {}
-        self.alt_whitelist_roles: Dict[int, Set[int]] = {}   # <-- was 'bot.alt_whitelist_roles' (fixed)
+        self.alt_whitelist_roles: Dict[int, Set[int]] = {}
         os.makedirs(self.DATA_DIR, exist_ok=True)
         self.load_mod_whitelist()
         self.load_alt_whitelist()
@@ -251,25 +252,41 @@ class DiscordBot(commands.Bot):
         try:
             if not os.path.exists(self.MOD_FILE):
                 self.mod_whitelist = {}
+                self.mod_whitelist_users = {}
                 self.save_mod_whitelist()
                 self.logger.info("Created empty mod whitelist at %s", self.MOD_FILE)
                 return
 
             with open(self.MOD_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f) or {}
+                # Load role-based whitelist
+                role_data = data.get("roles", {})
                 fixed: Dict[str, List[int]] = {}
-                for gid, roles in data.items():
+                for gid, roles in role_data.items():
                     fixed[str(gid)] = [int(r) for r in roles if isinstance(r, (int, str))]
                 self.mod_whitelist = fixed
+                
+                # Load user-based whitelist
+                user_data = data.get("users", {})
+                fixed_users: Dict[str, List[int]] = {}
+                for gid, users in user_data.items():
+                    fixed_users[str(gid)] = [int(u) for u in users if isinstance(u, (int, str))]
+                self.mod_whitelist_users = fixed_users
+                
             self.logger.info("Loaded mod whitelist for %d guild(s)", len(self.mod_whitelist))
         except Exception as e:
             self.logger.error("Failed to load mod whitelist: %s", e)
             self.mod_whitelist = {}
+            self.mod_whitelist_users = {}
 
     def save_mod_whitelist(self) -> None:
         try:
+            data = {
+                "roles": self.mod_whitelist,
+                "users": self.mod_whitelist_users
+            }
             with open(self.MOD_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.mod_whitelist, f, indent=2)
+                json.dump(data, f, indent=2)
         except Exception as e:
             self.logger.error("Failed to save mod whitelist: %s", e)
 
@@ -308,6 +325,44 @@ class DiscordBot(commands.Bot):
     def remove_mod_role(self, guild_id: int, role_id: int) -> bool:
         """Alias for remove_guild_mod_role for convenience."""
         return self.remove_guild_mod_role(guild_id, role_id)
+
+    # ---------- mod whitelist user APIs ----------
+    def get_guild_mod_user_ids(self, guild_id: int) -> Set[int]:
+        users = self.mod_whitelist_users.get(str(guild_id))
+        if users:
+            return set(int(u) for u in users)
+        return set()
+
+    def add_guild_mod_user(self, guild_id: int, user_id: int) -> None:
+        key = str(guild_id)
+        self.mod_whitelist_users.setdefault(key, [])
+        if int(user_id) not in self.mod_whitelist_users[key]:
+            self.mod_whitelist_users[key].append(int(user_id))
+            self.save_mod_whitelist()
+
+    def remove_guild_mod_user(self, guild_id: int, user_id: int) -> bool:
+        key = str(guild_id)
+        if key not in self.mod_whitelist_users:
+            return False
+        before = len(self.mod_whitelist_users[key])
+        self.mod_whitelist_users[key] = [
+            int(u) for u in self.mod_whitelist_users[key]
+            if int(u) != int(user_id)
+        ]
+        removed = len(self.mod_whitelist_users[key]) != before
+        if not self.mod_whitelist_users[key]:
+            del self.mod_whitelist_users[key]
+        if removed:
+            self.save_mod_whitelist()
+        return removed
+
+    def add_mod_user(self, guild_id: int, user_id: int) -> None:
+        """Alias for add_guild_mod_user for convenience."""
+        return self.add_guild_mod_user(guild_id, user_id)
+
+    def remove_mod_user(self, guild_id: int, user_id: int) -> bool:
+        """Alias for remove_guild_mod_user for convenience."""
+        return self.remove_guild_mod_user(guild_id, user_id)
 
     # ---------- ALT whitelist persistence ----------
     def load_alt_whitelist(self) -> None:
@@ -477,7 +532,12 @@ class DiscordBot(commands.Bot):
             if interaction.user.guild_permissions.administrator:
                 return True
 
+            # Check role-based mod whitelist
             if any(r.id in self.get_guild_mod_role_ids(interaction.guild.id) for r in interaction.user.roles):
+                return True
+            
+            # Check user-based mod whitelist
+            if interaction.user.id in self.get_guild_mod_user_ids(interaction.guild.id):
                 return True
 
             await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)

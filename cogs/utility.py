@@ -13,6 +13,7 @@ from discord.ext.commands import MemberNotFound
 from discord import app_commands
 from discord.utils import utcnow, format_dt
 from typing import Optional
+from utils.permissions import mod_check
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -156,13 +157,13 @@ class UtilityCog(commands.Cog):
         minutes, seconds = divmod(remainder, 60)
         
         uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
-        await ctx.send(f"⏰ Bot uptime: `{uptime_str}`", ephemeral=True)
+        await ctx.send(f"⏰ Bot uptime: `{uptime_str}`")
 
     @commands.hybrid_command(
         name="embed",
         description="Create a custom embed message"
     )
-    @commands.has_permissions(manage_messages=True)
+    @mod_check("manage_messages")
     async def embed_command(self, ctx: commands.Context):
         """Create a custom embed using modal popup - CLEAN VERSION."""
         # Delete command message immediately for prefix commands
@@ -186,7 +187,7 @@ class UtilityCog(commands.Cog):
         aliases=['eform'],
         description="Create an embed using modal form"
     )
-    @commands.has_permissions(manage_messages=True)
+    @mod_check("manage_messages")
     async def embed_form_command(self, ctx: commands.Context):
         """Create a custom embed message using a modal popup form."""
         # Delete command message immediately for prefix commands
@@ -572,9 +573,9 @@ class UtilityCog(commands.Cog):
     @app_commands.describe(count="How many cats to fetch (1-5)")
     async def cat(self, ctx: commands.Context, count: Optional[int] = 1):
         """Get random cat images (1-5)."""
-        # For slash commands, respond silently first
+        # For slash commands, respond silently first (but not ephemeral)
         if ctx.interaction:
-            await ctx.interaction.response.defer(ephemeral=True)
+            await ctx.interaction.response.defer()
         
         # Delete command message for prefix commands
         if not ctx.interaction:
@@ -608,23 +609,23 @@ class UtilityCog(commands.Cog):
                     else:
                         error_msg = f"❌ Cat API error: HTTP {response.status}"
                         if ctx.interaction:
-                            await ctx.interaction.followup.send(error_msg, ephemeral=True)
+                            await ctx.interaction.followup.send(error_msg)
                         else:
-                            await ctx.send(error_msg, ephemeral=True)
+                            await ctx.send(error_msg)
                         return
 
         except asyncio.TimeoutError:
             error_msg = "❌ Cat API request timed out. Please try again later!"
             if ctx.interaction:
-                await ctx.interaction.followup.send(error_msg, ephemeral=True)
+                await ctx.interaction.followup.send(error_msg)
             else:
-                await ctx.send(error_msg, ephemeral=True)
+                await ctx.send(error_msg)
         except Exception as e:
             error_msg = f"❌ Failed to fetch cats: {str(e)}"
             if ctx.interaction:
-                await ctx.interaction.followup.send(error_msg, ephemeral=True)
+                await ctx.interaction.followup.send(error_msg)
             else:
-                await ctx.send(error_msg, ephemeral=True)
+                await ctx.send(error_msg)
 
     @commands.hybrid_command(name="dog", description="Get a random dog image")
     @commands.cooldown(1, 5.0, commands.BucketType.user)
