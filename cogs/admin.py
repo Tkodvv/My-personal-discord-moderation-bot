@@ -1264,9 +1264,16 @@ class AdminCog(commands.Cog):
             return
 
         try:
-            # Update the bot's prefix (this is a simple implementation)
-            old_prefix = self.bot._text_prefix
-            self.bot._text_prefix = prefix
+            # Ensure we're in a guild
+            if not ctx.guild:
+                await ctx.send("❌ This command can only be used in a server.", ephemeral=True)
+                return
+                
+            # Get the old prefix
+            old_prefix = self.bot.get_guild_prefix(ctx.guild.id)
+            
+            # Update the bot's prefix for this guild
+            self.bot.set_guild_prefix(ctx.guild.id, prefix)
             
             embed = discord.Embed(
                 title="✅ Prefix Changed",

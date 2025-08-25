@@ -27,6 +27,7 @@ class DiscordBot(commands.Bot):
     DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
     MOD_FILE = os.path.join(DATA_DIR, "mod_whitelist.json")
     ALT_FILE = os.path.join(DATA_DIR, "alt_whitelist.json")
+    PREFIX_FILE = os.path.join(DATA_DIR, "prefixes.json")
 
     def __init__(self):
         # Setup required intents
@@ -36,12 +37,25 @@ class DiscordBot(commands.Bot):
         intents.guilds = True   # Needed for guild operations
         intents.presences = True  # Needed for status commands
 
-        # Initialize with fixed "!" prefix
-        self._text_prefix = "!"
+        # Initialize prefix storage
+        self.prefixes: Dict[str, str] = {}  # guild_id -> prefix
+        self._default_prefix = "!"
         
         def get_prefix(bot, message):
-            # Always allow mention and "!" prefix
-            return commands.when_mentioned_or("!")(bot, message)
+            # Always allow mention
+            prefixes = [f"<@!{bot.user.id}>", f"<@{bot.user.id}>"]
+            
+            # Add guild-specific prefix or default
+            if message.guild:
+                guild_prefix = bot.prefixes.get(
+                    str(message.guild.id), bot._default_prefix
+                )
+                prefixes.append(guild_prefix)
+            else:
+                # DMs use default prefix
+                prefixes.append(bot._default_prefix)
+                
+            return prefixes
         
         super().__init__(
             command_prefix=get_prefix,  # Use the prefix getter function
@@ -64,6 +78,7 @@ class DiscordBot(commands.Bot):
         os.makedirs(self.DATA_DIR, exist_ok=True)
         self.load_mod_whitelist()
         self.load_alt_whitelist()
+        self.load_prefixes()
 
         # health/uptime tracking
         self.boot_time = utcnow()
@@ -78,19 +93,34 @@ class DiscordBot(commands.Bot):
         try:
             # Simple ping to Discord API to maintain connection
             latency = round(self.latency * 1000, 2)
-            self.logger.debug(f"Keep-alive ping - Latency: {latency}ms")
+            
+            # Use try-catch for logging to prevent stream errors
+            try:
+                self.logger.debug(f"Keep-alive ping - Latency: {latency}ms")
+            except (OSError, ValueError):
+                # Ignore logging errors - they don't affect bot functionality
+                pass
             
             # Optional: Send a heartbeat message to console every hour
             if hasattr(self, '_keep_alive_counter'):
                 self._keep_alive_counter += 1
                 if self._keep_alive_counter >= 12:  # 12 * 5 minutes = 1 hour
-                    self.logger.info(f"Bot keep-alive heartbeat - Uptime: {self._get_uptime_string()}")
+                    try:
+                        uptime_str = self._get_uptime_string()
+                        self.logger.info(f"Bot keep-alive heartbeat - Uptime: {uptime_str}")
+                    except (OSError, ValueError):
+                        # Ignore logging errors - they don't affect bot functionality
+                        pass
                     self._keep_alive_counter = 0
             else:
                 self._keep_alive_counter = 0
                 
         except Exception as e:
-            self.logger.warning(f"Keep-alive task error: {e}")
+            # Only log if we can, otherwise just continue silently
+            try:
+                self.logger.warning(f"Keep-alive task error: {e}")
+            except (OSError, ValueError):
+                pass
 
     @keep_alive_task.before_loop
     async def before_keep_alive_task(self):
@@ -364,6 +394,42 @@ class DiscordBot(commands.Bot):
         """Alias for remove_guild_mod_user for convenience."""
         return self.remove_guild_mod_user(guild_id, user_id)
 
+    # ---------- prefix persistence ----------
+    def load_prefixes(self) -> None:
+        """Load guild prefixes from JSON file."""
+        try:
+            if not os.path.exists(self.PREFIX_FILE):
+                self.prefixes = {}
+                self.save_prefixes()
+                self.logger.info("Created empty prefixes file at %s", self.PREFIX_FILE)
+                return
+
+            with open(self.PREFIX_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+                self.prefixes = {str(k): str(v) for k, v in data.items()}
+                
+            self.logger.info("Loaded prefixes for %d guild(s)", len(self.prefixes))
+        except Exception as e:
+            self.logger.error("Failed to load prefixes: %s", e)
+            self.prefixes = {}
+
+    def save_prefixes(self) -> None:
+        """Save guild prefixes to JSON file."""
+        try:
+            with open(self.PREFIX_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.prefixes, f, indent=2)
+        except Exception as e:
+            self.logger.error("Failed to save prefixes: %s", e)
+
+    def set_guild_prefix(self, guild_id: int, prefix: str) -> None:
+        """Set prefix for a specific guild."""
+        self.prefixes[str(guild_id)] = prefix
+        self.save_prefixes()
+
+    def get_guild_prefix(self, guild_id: int) -> str:
+        """Get prefix for a specific guild."""
+        return self.prefixes.get(str(guild_id), self._default_prefix)
+
     # ---------- ALT whitelist persistence ----------
     def load_alt_whitelist(self) -> None:
         try:
@@ -485,74 +551,6 @@ class DiscordBot(commands.Bot):
         if self._member_has_allowed_role(ctx.author):
             return True
         raise commands.CheckFailure("❌ You don't have permission to use this command.")
-
-    async def setup_hook(self):
-        self.logger.info("Bot setup hook called")
-
-        # Load cogs
-        for cog in ["cogs.utility", "cogs.admin", "cogs.moderation"]:
-            try:
-                await self.load_extension(cog)
-                self.logger.info(f"Loaded {cog}")
-            except Exception as e:
-                self.logger.error(f"Failed to load {cog}: {e}")
-
-        # Optional small-guild chunk
-        self._enable_chunk_guild = lambda guild: len(guild.members) < 50
-        for guild in self.guilds:
-            if not guild.chunked and self._enable_chunk_guild(guild):
-                try:
-                    await guild.chunk()
-                except discord.HTTPException:
-                    pass
-
-        # Prefix commands: global gate
-        self.add_check(self._prefix_role_gate)
-
-        # Slash commands: global gate
-        async def _check_interaction(interaction: discord.Interaction) -> bool:
-            if not interaction.guild:
-                await interaction.response.send_message("❌ Commands can only be used in a server.", ephemeral=True)
-                return False
-
-            cmd_name = interaction.command.name if interaction.command else None
-            if cmd_name == "health":
-                return True
-
-            if cmd_name == "alt":
-                if not isinstance(interaction.user, discord.Member) or not self.allow_alt(interaction.user):
-                    await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
-                    return False
-                return True
-
-            if not isinstance(interaction.user, discord.Member):
-                await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
-                return False
-
-            if interaction.user.guild_permissions.administrator:
-                return True
-
-            # Check role-based mod whitelist
-            if any(r.id in self.get_guild_mod_role_ids(interaction.guild.id) for r in interaction.user.roles):
-                return True
-            
-            # Check user-based mod whitelist
-            if interaction.user.id in self.get_guild_mod_user_ids(interaction.guild.id):
-                return True
-
-            await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
-            return False
-            
-        self.tree.interaction_check = _check_interaction
-
-        # Sync slash commands
-        try:
-            synced = await self.tree.sync()
-            self.last_sync_time = utcnow()
-            self._did_tree_sync = True
-            self.logger.info("Synced %d slash commands", len(synced))
-        except Exception as e:
-            self.logger.error(f"Failed to sync slash commands: {e}")
 
     async def on_ready(self):
         # Set start time for uptime calculation
