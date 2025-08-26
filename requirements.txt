@@ -1,13 +1,82 @@
-# Core Discord.py and dependencies
-discord.py>=2.5.0,<3.0.0
-aiohttp>=3.9.0,<4.0.0
-python-dotenv>=1.0.0,<2.0.0
-httpx>=0.27.0,<1.0.0
+# ===== ESSENTIAL DEPENDENCIES (Updated 2025) =====
 
-# Web server for Render deployment  
-flask>=3.0.0,<4.0.0
+# Core Discord.py - LATEST STABLE
+discord.py>=2.6.0,<3.0.0
 
-# Python 3.12 compatible versions
-typing-extensions>=4.8.0; python_version<"3.12"
+# Async HTTP - Required by discord.py and your bot
+aiohttp>=3.10.0,<4.0.0
+
+# Environment variables - Used throughout your bot
+python-dotenv>=1.0.1,<2.0.0
+
+# Voice support and crypto - Essential for Discord voice features
+PyNaCl>=1.5.0,<2.0.0
+
+# HTTP client - Used in your cogs (admin.py, utility.py)
+httpx>=0.28.0,<1.0.0
+
+# Web server - Required for Render deployment
+flask>=3.1.0,<4.0.0
+werkzeug>=3.1.0,<4.0.0
+
+# ===== PERFORMANCE & UTILITIES =====
+
+# Fast HTTP requests - Fallback for httpx
+requests>=2.32.0,<3.0.0
+
+# URL handling
+urllib3>=2.2.0,<3.0.0
+
+# Type checking support
+typing-extensions>=4.12.0
+
+# JSON handling - For your data files
+# (built-in json module is sufficient, but orjson is faster)
+orjson>=3.10.0; python_version>="3.8"
+
+# Date/time utilities - Used in your cogs
+python-dateutil>=2.9.0
+
+# ===== LOGGING & MONITORING =====
+
+# Enhanced logging - For better debug output
+colorlog>=6.8.0
+
+# System monitoring - Optional but useful
+psutil>=6.1.0
+
+# ===== SECURITY & ENCRYPTION =====
+
+# Modern cryptography - Security updates
+cryptography>=44.0.0
+
+# ===== PLATFORM-SPECIFIC OPTIMIZATIONS =====
+
+# Event loop optimization for Linux/Mac (not Windows)
+uvloop>=0.21.0; sys_platform != "win32" and python_version>="3.8"
+
+# ===== OPTIONAL DEPENDENCIES =====
+# Uncomment if you plan to use these features:
+
+# Database support
+# asyncpg>=0.30.0              # PostgreSQL async
+# aiosqlite>=0.20.0            # SQLite async
+# sqlalchemy>=2.0.0            # ORM
+
+# Cache/Redis support  
+# redis>=5.2.0                 # Redis client
+# aioredis>=2.0.1              # Async Redis
+
+# Configuration formats
+# pyyaml>=6.0.2                # YAML config files
+# toml>=0.10.2                 # TOML config files
+
+# Image processing (if you add image commands)
+# pillow>=11.0.0               # Image manipulation
+# opencv-python>=4.10.0        # Computer vision
+
+# Text processing
+# beautifulsoup4>=4.12.0       # HTML parsing
+# lxml>=5.3.0                  # XML/HTML parser
 
 
