@@ -3,10 +3,18 @@
 # Katabump deployment script for Discord Bot
 echo "🚀 Starting Discord Moderation Bot deployment..."
 
+# Navigate to the correct directory
+cd Slice-Moderation-main || {
+    echo "❌ Error: Slice-Moderation-main directory not found"
+    echo "📁 Current directory contents:"
+    ls -la
+    exit 1
+}
+
 # Check if main.py exists
 if [ ! -f "main.py" ]; then
-    echo "❌ Error: main.py not found in current directory"
-    echo "📁 Current directory contents:"
+    echo "❌ Error: main.py not found in Slice-Moderation-main directory"
+    echo "📁 Directory contents:"
     ls -la
     exit 1
 fi
