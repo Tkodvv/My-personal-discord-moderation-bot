@@ -456,7 +456,7 @@ class ModerationCog(commands.Cog):
 
         try:
             await member.timeout(None, reason=f"Timeout removed by staff: {reason}")
-            e = self._dyno_style_embed("had their timeout removed", member, reason)
+            e = self._dyno_style_embed("untimed out", member, reason)
             e.set_footer(text=f"User ID: {member.id}")
             await interaction.response.send_message(embed=e)
         except discord.Forbidden:
@@ -1026,7 +1026,7 @@ class ModerationCog(commands.Cog):
 
         try:
             await member.timeout(None, reason=f"Timeout removed by staff: {reason}")
-            e = self._dyno_style_embed("had their timeout removed", member, reason)
+            e = self._dyno_style_embed("untimed out", member, reason)
             e.set_footer(text=f"User ID: {member.id}")
             await ctx.send(embed=e)
         except discord.Forbidden:

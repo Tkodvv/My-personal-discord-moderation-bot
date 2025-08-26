@@ -1,0 +1,26 @@
+{
+  "name": "slice-moderation-bot",
+  "description": "Discord moderation bot with comprehensive admin and utility commands",
+  "repository": "https://github.com/Tkodvv/Slice-Moderation",
+  "keywords": ["discord", "bot", "moderation", "python"],
+  "env": {
+    "DISCORD_TOKEN": {
+      "description": "Discord bot token from Discord Developer Portal",
+      "required": true
+    }
+  },
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "python": {
+    "version": "3.12.7"
+  }
+}

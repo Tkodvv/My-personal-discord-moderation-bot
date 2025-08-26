@@ -1,6 +1,6 @@
 # Discord Moderation Bot
 
-A comprehensive Discord moderation bot built with Python and discord.py v2.3+, featuring modern slash commands and extensive moderation capabilities.
+A comprehensive Discord moderation bot built with Python and discord.py v2.5+, featuring modern slash commands and extensive moderation capabilities.
 
 ## Features
 
@@ -41,8 +41,16 @@ A comprehensive Discord moderation bot built with Python and discord.py v2.3+, f
 ## Setup Instructions
 
 ### Prerequisites
-- Python 3.8 or higher
+- **Python 3.11+ or Python 3.12** (recommended for hosting)
 - A Discord bot token
+
+### Python 3.12 Compatibility
+This bot is fully compatible with Python 3.12 and optimized for modern hosting platforms like:
+- **Katabump** 
+- **Heroku**
+- **Railway**
+- **Render**
+- **PythonAnywhere**
 
 ### Getting Your Discord Bot Token
 1. Go to [Discord Developer Portal](https://discord.com/developers/applications)

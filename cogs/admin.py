@@ -120,6 +120,9 @@ class AdminCog(commands.Cog):
         # Wait for bot to be ready
         await self.bot.wait_until_ready()
         
+        # Add a small delay to ensure all systems are ready
+        await asyncio.sleep(2)
+        
         try:
             # Map activity types
             activity_mapping = {
@@ -141,13 +144,30 @@ class AdminCog(commands.Cog):
             # Get saved settings
             activity_type = self.saved_status.get("activity_type", "watching")
             activity_name = self.saved_status.get("activity_name", "for rule violations")
-            presence = self.saved_status.get("presence", "online")
+            presence = self.saved_status.get("presence", "dnd")
             
             # Create activity
             activity = discord.Activity(
                 type=activity_mapping.get(activity_type, discord.ActivityType.watching),
                 name=activity_name
             )
+            
+            # Set status and presence
+            await self.bot.change_presence(
+                status=presence_mapping.get(presence, discord.Status.dnd),
+                activity=activity
+            )
+            
+            self.logger.info(f"Restored bot status: {activity_type} {activity_name} | {presence}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to restore bot status: {e}")
+            # Fallback to default
+            try:
+                activity = discord.Activity(type=discord.ActivityType.watching, name="for rule violations")
+                await self.bot.change_presence(status=discord.Status.dnd, activity=activity)
+            except Exception as fallback_error:
+                self.logger.error(f"Fallback status setting also failed: {fallback_error}")
             
             # Set status and presence
             await self.bot.change_presence(
@@ -1745,26 +1765,24 @@ class AdminCog(commands.Cog):
         if not ctx.interaction:
             try:
                 await ctx.message.delete()
-            except discord.NotFound:
-                pass
-            except discord.Forbidden:
+            except (discord.NotFound, discord.Forbidden):
                 pass
         
         presence = presence.lower()
         
-        # Map presence types
+        # Map presence types with emojis for display
         presence_mapping = {
-            'online': discord.Status.online,
-            'idle': discord.Status.idle,
-            'dnd': discord.Status.dnd,
-            'invisible': discord.Status.invisible
+            'online': (discord.Status.online, '🟢 Online'),
+            'idle': (discord.Status.idle, '🟡 Idle'),
+            'dnd': (discord.Status.dnd, '🔴 Do Not Disturb'),
+            'invisible': (discord.Status.invisible, '⚫ Invisible')
         }
         
         if presence not in presence_mapping:
             valid_presences = ", ".join(presence_mapping.keys())
             error_msg = f"❌ Invalid presence. Valid types: {valid_presences}"
             if ctx.interaction:
-                await ctx.send(error_msg, ephemeral=True)
+                await ctx.interaction.response.send_message(error_msg, ephemeral=True)
             else:
                 await ctx.send(error_msg, delete_after=5)
             return
@@ -1772,7 +1790,7 @@ class AdminCog(commands.Cog):
         try:
             # Get current activity from saved settings to preserve it
             current_activity_type = self.saved_status.get("activity_type", "watching")
-            current_activity_name = self.saved_status.get("activity_name", "for rule violations")
+            current_activity_name = self.saved_status.get("activity_name", "idiots")
             
             # Map activity types
             activity_mapping = {
@@ -1789,23 +1807,19 @@ class AdminCog(commands.Cog):
                 name=current_activity_name
             )
             
+            # Get status and display name
+            status_obj, display_name = presence_mapping[presence]
+            
             # Change the bot's presence while preserving activity
-            await self.bot.change_presence(status=presence_mapping[presence], activity=activity)
+            await self.bot.change_presence(status=status_obj, activity=activity)
             
             # Save the new presence setting
             self.save_status_settings(presence=presence)
             
             # Confirm the change
-            presence_display = {
-                'online': '🟢 Online',
-                'idle': '🟡 Idle',
-                'dnd': '🔴 Do Not Disturb',
-                'invisible': '⚫ Invisible'
-            }
-            
-            success_msg = f"✅ Presence changed to {presence_display[presence]} (saved)"
+            success_msg = f"✅ Presence changed to {display_name} (saved)"
             if ctx.interaction:
-                await ctx.send(success_msg, ephemeral=True)
+                await ctx.interaction.response.send_message(success_msg, ephemeral=True)
             else:
                 await ctx.send(success_msg, delete_after=3)
                 
@@ -1814,7 +1828,10 @@ class AdminCog(commands.Cog):
         except Exception as e:
             error_msg = f"❌ Failed to change presence: {e}"
             if ctx.interaction:
-                await ctx.send(error_msg, ephemeral=True)
+                if not ctx.interaction.response.is_done():
+                    await ctx.interaction.response.send_message(error_msg, ephemeral=True)
+                else:
+                    await ctx.interaction.followup.send(error_msg, ephemeral=True)
             else:
                 await ctx.send(error_msg, delete_after=5)
             self.logger.error("Failed to change bot presence: %s", e)

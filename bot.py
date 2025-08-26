@@ -560,8 +560,7 @@ class DiscordBot(commands.Bot):
         if self.user:
             self.logger.info(f"Bot is ready! Logged in as {self.user} (ID: {self.user.id})")
         self.logger.info(f"Connected to {len(self.guilds)} guilds")
-        activity = discord.Activity(type=discord.ActivityType.watching, name="for rule violations")
-        await self.change_presence(activity=activity, status=discord.Status.online)
+        # Status/presence will be handled by AdminCog's restore_status_on_ready()
 
     async def on_guild_join(self, guild: discord.Guild):
         self.logger.info(f"Joined new guild: {guild.name} (ID: {guild.id})")
