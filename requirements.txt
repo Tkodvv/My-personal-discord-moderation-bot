@@ -4,6 +4,9 @@ aiohttp>=3.9.0,<4.0.0
 python-dotenv>=1.0.0,<2.0.0
 httpx>=0.27.0,<1.0.0
 
+# Web server for Render deployment  
+flask>=3.0.0,<4.0.0
+
 # Python 3.12 compatible versions
 typing-extensions>=4.8.0; python_version<"3.12"
 
