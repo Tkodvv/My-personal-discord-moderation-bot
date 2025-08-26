@@ -22,5 +22,8 @@
   ],
   "python": {
     "version": "3.12.7"
+  },
+  "scripts": {
+    "start": "python3.12 main.py"
   }
 }
